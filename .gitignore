@@ -1,0 +1,9 @@
+*.o
+*.rc
+*.res
+*.bat
+*.cmd
+*.dll
+*.txt
+*.exe
+*.json
