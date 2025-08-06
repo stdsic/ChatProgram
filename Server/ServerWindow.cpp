@@ -226,6 +226,7 @@ void ServerWindow::PostAccept(){
 
         IOEvent *NewEvent = new IOEvent();
         memset(&NewEvent->ov, 0, sizeof(OVERLAPPED));
+        NewEvent->RefCount = 1;
         NewEvent->Type = IOEventType::ACCEPT;
         NewEvent->Session = NewSession;
 
@@ -287,7 +288,24 @@ void ServerWindow::Processing(){
 
     IOEvent *NewEvent = NULL;
     if(GetQueuedCompletionStatus(hcp, &dwTrans, (PULONG_PTR)&Key, (OVERLAPPED**)&NewEvent, INFINITE)){
+        ClientSession Session = NewEvent->Session;
         
+        switch(NewEvent->Type){
+            case IOEventType::CONNECT:
+                break;
+
+            case IOEventType::DISCONNECT:
+                break;
+
+            case IOEventType::ACCEPT:
+                break;
+
+            case IOEventType::RECV:
+                break;
+
+            case IOEventType::SEND:
+                break;
+        }
     }
 }
 

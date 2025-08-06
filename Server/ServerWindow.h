@@ -25,9 +25,11 @@ private:
             sockaddr_in LocalAddress;       // Server
             sockaddr_in RemoteAddress;      // Client
 
+        private:
             wchar_t *RecvBuffer;
             wchar_t *SendBuffer;
             wchar_t AcceptBuffer[OutputBufferLength];
+            Queue Q;
 
         public:
             ClientSession() : Front(0), Rear(0), Capacity(0), bConnected(0) {
@@ -74,7 +76,9 @@ private:
             OVERLAPPED ov;
             IOEventType Type;
             ClientSession *Session;
-            WSABUF buf;
+            wchar_t TempBuffer[0x1000];
+            wchar_t SendBuffers[10][0x1000];
+            LONG RefCount;
     };
 
 private:
