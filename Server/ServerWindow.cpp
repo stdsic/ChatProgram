@@ -50,6 +50,7 @@ LRESULT ServerWindow::OnCreate(WPARAM wParam, LPARAM lParam){
     hPannel = CreateWindow(L"static", NULL, WS_VISIBLE | WS_CHILD | WS_BORDER | WS_CLIPSIBLINGS, 0,0,0,0, _hWnd, NULL, GetModuleHandle(NULL), NULL);
     hChatEdit = CreateWindow(L"Edit", NULL, WS_VISIBLE | WS_CHILD | WS_BORDER | WS_CLIPSIBLINGS | WS_VSCROLL | ES_MULTILINE | ES_AUTOVSCROLL , 0,0,0,0, _hWnd, NULL, GetModuleHandle(NULL), NULL);
 
+    Listening();
     return 0;
 }
 
@@ -160,6 +161,34 @@ ServerWindow::~ServerWindow(){
     WSACleanup();
 }
 
+void ServerWindow::Exception::GetErrorMessage(BOOL WSAError){
+    LPVOID lpMsgBuf = NULL;
+
+    if(WSAError){
+        ErrorCode = WSAGetLastError();
+    }else{
+        ErrorCode = GetLastError();
+    }
+
+    FormatMessage(
+            FORMAT_MESSAGE_ALLOCATE_BUFFER | FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS,
+            NULL,
+            ErrorCode,
+            MAKELANGID(LANG_NEUTRAL, SUBLANG_DEFAULT),
+            (LPWSTR)&lpMsgBuf,
+            0,
+            NULL
+            );
+
+    if(lpMsgBuf){
+        MessageBox(HWND_DESKTOP, (const wchar_t*)lpMsgBuf, L"Error", MB_ICONERROR | MB_OK);
+        LocalFree(lpMsgBuf);
+        return;
+    }else{
+        MessageBox(HWND_DESKTOP, L"알 수 없는 오류가 발생했습니다.", L"Error", MB_ICONERROR | MB_OK);
+    }
+}
+
 SOCKET ServerWindow::CreateSocket(){
     return WSASocket(AF_INET, SOCK_STREAM, IPPROTO_TCP, NULL, 0, WSA_FLAG_OVERLAPPED);
 }
@@ -226,14 +255,10 @@ void ServerWindow::PostAccept(){
 
         IOEvent *NewEvent = new IOEvent();
         memset(&NewEvent->ov, 0, sizeof(OVERLAPPED));
-        NewEvent->RefCount = 1;
         NewEvent->Type = IOEventType::ACCEPT;
         NewEvent->Session = NewSession;
 
-        NewEvent->buf.buf = (char*)NewSession->GetAcceptBuffer();
-        NewEvent->buf.len = sizeof(wchar_t) * ClientSession::GetOutputBufferLength();
         // [ 클라이언트 주소 공간 ] + [ 서버 주소 공간 ] + [ 선택적 데이터 공간 ]
-
         if(NewSession->GetSocket() != SOCKET_ERROR){
             ret = lpfnAcceptEx(
                     listen_sock,                                // 듣기 전용 소켓
@@ -247,38 +272,10 @@ void ServerWindow::PostAccept(){
                     );
 
             if(ret == 0 && WSAGetLastError() != ERROR_IO_PENDING){
+                delete NewEvent->Session;
                 delete NewEvent;
-                delete NewSession;
             }
         }
-    }
-}
-
-void ServerWindow::Exception::GetErrorMessage(BOOL WSAError){
-    LPVOID lpMsgBuf = NULL;
-
-    if(WSAError){
-        ErrorCode = WSAGetLastError();
-    }else{
-        ErrorCode = GetLastError();
-    }
-
-    FormatMessage(
-            FORMAT_MESSAGE_ALLOCATE_BUFFER | FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS,
-            NULL,
-            ErrorCode,
-            MAKELANGID(LANG_NEUTRAL, SUBLANG_DEFAULT),
-            (LPWSTR)&lpMsgBuf,
-            0,
-            NULL
-            );
-
-    if(lpMsgBuf){
-        MessageBox(HWND_DESKTOP, (const wchar_t*)lpMsgBuf, L"Error", MB_ICONERROR | MB_OK);
-        LocalFree(lpMsgBuf);
-        return;
-    }else{
-        MessageBox(HWND_DESKTOP, L"알 수 없는 오류가 발생했습니다.", L"Error", MB_ICONERROR | MB_OK);
     }
 }
 
@@ -287,17 +284,99 @@ void ServerWindow::Processing(){
     ULONG_PTR Key;
 
     IOEvent *NewEvent = NULL;
-    if(GetQueuedCompletionStatus(hcp, &dwTrans, (PULONG_PTR)&Key, (OVERLAPPED**)&NewEvent, INFINITE)){
-        ClientSession Session = NewEvent->Session;
-        
+    BOOL bWork = GetQueuedCompletionStatus(hcp, &dwTrans, (PULONG_PTR)&Key, (OVERLAPPED**)&NewEvent, INFINITE);
+    ClientSession *Session = NewEvent->Session;
+    IOEventType EventType = NewEvent->Type;
+
+    if(!bWork){
+        DWORD dwError = GetLastError();
+
+        switch(dwError){
+            case ERROR_NETNAME_DELETED:         // 클라이언트가 연결을 끊음
+            case ERROR_CONNECTION_ABORTED:      // 연결이 비정상적으로 종료됨
+            case ERROR_OPERATION_ABORTED:       // 작업이 취소됨 (CancelIoEx 등)
+                PostDisconnect(Session);
+                break;
+
+            default:
+                // LogUnexpectedError(dwError);
+                PostDisconnect(Session);
+                break;
+        }
+    }else if(bWork && dwTrans == 0 && EventType != IOEventType::DISCONNECT && EventType != IOEventType::CONNECT){
+        // 정상 종료
+        PostDisconnect(Session);
+    }else{
         switch(NewEvent->Type){
             case IOEventType::CONNECT:
+                Session->SetConnected(TRUE);
+                // AppendSession();
+
+                if(Session->IsConnected()){
+                    WSABUF buf;
+                    buf.buf = (char*)Session->GetWritePosition();
+                    buf.len = sizeof(wchar_t) * Session->FreeSize();
+
+                    DWORD dwBytes = 0, dwFlags = 0;
+                    ret = WSARecv(
+                            Session->GetSocket(),
+                            &buf,
+                            1,
+                            &dwBytes,
+                            &dwFlags,
+                            (OVERLAPPED*)&Session->RecvEvent.ov,
+                            NULL
+                            );
+                    if(ret == SOCKET_ERROR && WSAGetLastError() != WSA_IO_PENDING){
+                        // Error 경고 문구 출력 등
+
+                    }
+                }
                 break;
 
             case IOEventType::DISCONNECT:
+                Session->SetConnected(FALSE);
+                Session->ConnectEvent.ResetTasks();
+                // DeleteSession();
                 break;
 
             case IOEventType::ACCEPT:
+                if(Session){
+                    delete NewEvent;
+                    if(setsockopt(
+                                Session->GetSocket(),
+                                SOL_SOCKET, SO_UPDATE_ACCEPT_CONTEXT,
+                                (const char*)&listen_sock,
+                                sizeof(listen_sock)
+                                ) == SOCKET_ERROR){
+                        delete Session;
+                        PostAccept();
+                        break;
+                    }
+
+                    struct sockaddr_in NewRemoteAddress;
+                    int cbSize = sizeof(NewRemoteAddress);
+
+                    if(getpeername(
+                                Session->GetSocket(),
+                                (struct sockaddr*)&NewRemoteAddress,
+                                &cbSize) == SOCKET_ERROR){
+                        delete Session;
+                        PostAccept();
+                        break;
+                    }
+
+                    wchar_t IP[INET_ADDRSTRLEN];
+                    if(InetNtopW(AF_INET, &NewRemoteAddress.sin_addr, IP, INET_ADDRSTRLEN) != NULL){
+                        // Show IP Address
+
+
+                        // Post ConnectEvent
+                        Session->SetRemoteAddress(NewRemoteAddress);
+                        PostConnect(Session);
+                    }
+                }
+                PostAccept();
                 break;
 
             case IOEventType::RECV:
@@ -309,4 +388,16 @@ void ServerWindow::Processing(){
     }
 }
 
+void ServerWindow::PostConnect(ClientSession *Session){
+    Session->ConnectEvent.ResetTasks();
+    Session->ConnectEvent.Session = Session;
+    Session->ConnectEvent.Type = IOEventType::CONNECT;
+    PostQueuedCompletionStatus(hcp, 0, (ULONG_PTR)Session, &Session->ConnectEvent.ov);
+}
 
+void ServerWindow::PostDisconnect(ClientSession *Session){
+    Session->DisconnectEvent.ResetTasks();
+    Session->DisconnectEvent.Session = Session;
+    Session->DisconnectEvent.Type = IOEventType::DISCONNECT;
+    PostQueuedCompletionStatus(hcp, 0, (ULONG_PTR)Session, &Session->DisconnectEvent.ov);
+}

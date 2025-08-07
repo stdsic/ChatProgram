@@ -6,6 +6,21 @@
 #include "BaseWindow.h"
 
 class ServerWindow : public BaseWindow<ServerWindow> {
+    class ClientSession;
+
+private:
+    enum class IOEventType : UCHAR { CONNECT, DISCONNECT, ACCEPT, RECV, SEND };
+    class IOEvent{
+        public:
+            IOEvent() : Session(NULL) { ResetTasks(); }
+            void ResetTasks() { memset(&ov, 0, sizeof(ov)); }
+
+        public:
+            OVERLAPPED ov;
+            IOEventType Type;
+            ClientSession *Session;
+    };
+
 private:
     // 액세스 지정자를 private으로 하여 외부에선 접근할 수 없다.
     // 즉, ClientSession의 모든 함수와 멤버를 public으로 선언해도 상관은 없으나 이미 작성해둔거 그냥 두기로 한다.
@@ -20,8 +35,8 @@ private:
             const int DefaultSize = 0x1000;
 
         private:
+            LONG bConnected;
             SOCKET client_sock;
-            volatile LONG bConnected;
             sockaddr_in LocalAddress;       // Server
             sockaddr_in RemoteAddress;      // Client
 
@@ -29,11 +44,26 @@ private:
             wchar_t *RecvBuffer;
             wchar_t *SendBuffer;
             wchar_t AcceptBuffer[OutputBufferLength];
-            Queue Q;
+
+        public:
+            // private으로 액세스 지정자를 변경하는 것이 좋다.
+            // 다만, 이렇게 되면 여러가지로 번거롭다.
+            // 현재 작업 스레드의 로직이 단순한 switch case문이고,
+            // 다형성 지원이나 클래스를 확장할 생각은 없으므로
+            // 간단하게 직접 접근이 가능한 public 액세스 지정자를 사용했다.
+            class IOEvent RecvEvent;
+            class IOEvent SendEvent;
+            class IOEvent ConnectEvent;
+            class IOEvent DisconnectEvent;
 
         public:
             ClientSession() : Front(0), Rear(0), Capacity(0), bConnected(0) {
                 Capacity = DefaultSize * 10;
+                RecvEvent.Type = IOEventType::RECV;
+                SendEvent.Type = IOEventType::SEND;
+                ConnectEvent.Type = IOEventType::CONNECT;
+                DisconnectEvent.Type = IOEventType::DISCONNECT;
+
                 memset(AcceptBuffer, 0, sizeof(AcceptBuffer));
                 RecvBuffer = (wchar_t*)malloc(sizeof(wchar_t) * Capacity);
                 SendBuffer = (wchar_t*)malloc(sizeof(wchar_t) * Capacity);
@@ -42,12 +72,18 @@ private:
             ~ClientSession(){
                 if(RecvBuffer){ free(RecvBuffer); }
                 if(SendBuffer){ free(SendBuffer); }
+                if(client_sock){ closesocket(client_sock); }
             }
+
+        public:
+            void SetConnected(BOOL bValue) { InterlockedExchange(&bConnected, bValue ? 1: 0); }
+            BOOL IsConnected() const { return InterlockedCompareExchange((LONG*)&bConnected, 0, 0) != 0; }
 
         public:
             sockaddr_in GetLocalAddress() { return LocalAddress; }
             sockaddr_in GetRemoteAddress() { return RemoteAddress; }
-            BOOL IsConnected() { return bConnected; }
+            void SetLocalAddress(sockaddr_in NewLocalAddress) { LocalAddress = NewLocalAddress; }
+            void SetRemoteAddress(sockaddr_in NewRemoteAddress) { RemoteAddress = NewRemoteAddress; }
 
         public:
             void SetSocket(SOCKET NewSocket){ client_sock = NewSocket; } 
@@ -67,18 +103,6 @@ private:
             int FreeSize() const { return Capacity - Front; }
             int GetCapacity() const { return Capacity; }
             static const int GetOutputBufferLength() { return OutputBufferLength; }
-    };
-
-private:
-    enum class IOEventType : UCHAR { CONNECT, DISCONNECT, ACCEPT, RECV, SEND };
-    class IOEvent{
-        public:
-            OVERLAPPED ov;
-            IOEventType Type;
-            ClientSession *Session;
-            wchar_t TempBuffer[0x1000];
-            wchar_t SendBuffers[10][0x1000];
-            LONG RefCount;
     };
 
 private:
@@ -115,7 +139,7 @@ private:
     };
 
 private:
-    volatile BOOL bRunning;
+    BOOL bRunning;
     
     HANDLE hShutdownEvent;
     CRITICAL_SECTION cs;
@@ -161,6 +185,8 @@ private:
 private:
     BOOL Listening();
     void PostAccept();
+    void PostConnect(ClientSession *Session);
+    void PostDisconnect(ClientSession *Session);
 
 public:
     ServerWindow();
