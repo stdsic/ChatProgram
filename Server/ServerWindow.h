@@ -51,10 +51,10 @@ private:
             // 현재 작업 스레드의 로직이 단순한 switch case문이고,
             // 다형성 지원이나 클래스를 확장할 생각은 없으므로
             // 간단하게 직접 접근이 가능한 public 액세스 지정자를 사용했다.
-            class IOEvent RecvEvent;
-            class IOEvent SendEvent;
-            class IOEvent ConnectEvent;
-            class IOEvent DisconnectEvent;
+            IOEvent RecvEvent;
+            IOEvent SendEvent;
+            IOEvent ConnectEvent;
+            IOEvent DisconnectEvent;
 
         public:
             ClientSession() : Front(0), Rear(0), Capacity(0), bConnected(0) {
@@ -105,7 +105,7 @@ private:
             static const int GetOutputBufferLength() { return OutputBufferLength; }
     };
 
-private:
+public:
     class Exception{
         int ErrorCode;
 
@@ -187,6 +187,16 @@ private:
     void PostAccept();
     void PostConnect(ClientSession *Session);
     void PostDisconnect(ClientSession *Session);
+
+private:
+    LONG *bUse;
+    ClientSession **SessionPool;
+    void CreateSessionPool(int Count);
+    void DeleteSessionPool(int Count);
+
+public:
+    ClientSession* GetSession(int Count);
+    void ReleaseSession(ClientSession* Session, int Count);
 
 public:
     ServerWindow();

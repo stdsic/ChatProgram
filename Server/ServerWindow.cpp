@@ -51,6 +51,7 @@ LRESULT ServerWindow::OnCreate(WPARAM wParam, LPARAM lParam){
     hChatEdit = CreateWindow(L"Edit", NULL, WS_VISIBLE | WS_CHILD | WS_BORDER | WS_CLIPSIBLINGS | WS_VSCROLL | ES_MULTILINE | ES_AUTOVSCROLL , 0,0,0,0, _hWnd, NULL, GetModuleHandle(NULL), NULL);
 
     Listening();
+    PostAccept();
     return 0;
 }
 
@@ -105,7 +106,7 @@ LPFN_ACCEPTEX ServerWindow::lpfnAcceptEx = NULL;
 LPFN_CONNECTEX ServerWindow::lpfnConnectEx = NULL;
 LPFN_DISCONNECTEX ServerWindow::lpfnDisconnectEx = NULL;
 
-ServerWindow::ServerWindow() : bCritical(FALSE), bRunning(FALSE), dwKeepAliveOption(1), dwReuseAddressOption(1){
+ServerWindow::ServerWindow() : bCritical(FALSE), bRunning(FALSE), dwKeepAliveOption(1), dwReuseAddressOption(1), bUse(NULL), SessionPool(NULL){
     if(WSAStartup(MAKEWORD(2,2), &wsa) == 0){
         Dummy = CreateSocket();
         if(!Dummy){ throw Exception(); }
@@ -130,6 +131,7 @@ ServerWindow::ServerWindow() : bCritical(FALSE), bRunning(FALSE), dwKeepAliveOpt
         hcp = CreateIoCompletionPort(INVALID_HANDLE_VALUE, NULL, 0,0);
         if(!hcp){ throw Exception(FALSE); }
 
+        CreateSessionPool(nLogicalProcessors * 4);
         for(int i=0; i < nLogicalProcessors * 2; i++){
             hThread[i] = CreateThread(NULL, 0, WorkerThreadHandler, this, 0, &dwThreadID[i]);
         }
@@ -150,6 +152,7 @@ ServerWindow::~ServerWindow(){
         }
     }
 
+    if(SessionPool){ DeleteSessionPool(nLogicalProcessors * 4); }
     if(hThread){ free(hThread); }
     if(dwThreadID){ free(dwThreadID); }
     if(bCritical){ DeleteCriticalSection(&cs); }
@@ -250,7 +253,8 @@ void ServerWindow::PostAccept(){
     DWORD dwRecvBytes;
 
     for(int i=0; i<nLogicalProcessors; i++){
-        ClientSession *NewSession = new ClientSession();
+        ClientSession *NewSession = GetSession(nLogicalProcessors * 4);
+        if(!NewSession){ throw Exception(); }
         NewSession->SetSocket(CreateSocket());
 
         IOEvent *NewEvent = new IOEvent();
@@ -272,7 +276,7 @@ void ServerWindow::PostAccept(){
                     );
 
             if(ret == 0 && WSAGetLastError() != ERROR_IO_PENDING){
-                delete NewEvent->Session;
+                ReleaseSession(NewSession, nLogicalProcessors);
                 delete NewEvent;
             }
         }
@@ -310,6 +314,7 @@ void ServerWindow::Processing(){
         switch(NewEvent->Type){
             case IOEventType::CONNECT:
                 Session->SetConnected(TRUE);
+                // 세션 풀로 관리하는 구조가 아니라면 여기서 세션을 추가하면 된다.
                 // AppendSession();
 
                 if(Session->IsConnected()){
@@ -327,17 +332,52 @@ void ServerWindow::Processing(){
                             (OVERLAPPED*)&Session->RecvEvent.ov,
                             NULL
                             );
-                    if(ret == SOCKET_ERROR && WSAGetLastError() != WSA_IO_PENDING){
-                        // Error 경고 문구 출력 등
+                    if(ret == SOCKET_ERROR){
+                        DWORD dwError = WSAGetLastError();
+                        switch(dwError){
+                            case WSA_IO_PENDING:
+                                // 정상
+                                break;
 
+                            case WSAECONNRESET:
+                                // 클라이언트가 연결을 강제로 종료
+                                PostDisconnect(Session);
+                                break;
+
+                            case WSAESHUTDOWN:
+                                // 소켓이 이미 닫힘
+                                PostDisconnect(Session);
+                                break;
+
+                            case WSAENOTCONN:
+                                // 연결되지 않은 소켓
+                                PostDisconnect(Session);
+                                break;
+
+                            case WSAENOTSOCK:
+                                // 유효하지 않은 소켓
+                                PostDisconnect(Session);
+                                break;
+
+                            case WSAEMSGSIZE:
+                                // 버퍼 크기 초과
+                                break;
+
+                            case WSAEWOULDBLOCK:
+                                // 비동기 통신에서도 드물게 발생함
+                                break;
+
+                            default:
+                                // 알 수 없는 에러
+                                PostDisconnect(Session);
+                                break;
+                        }
                     }
                 }
                 break;
 
             case IOEventType::DISCONNECT:
-                Session->SetConnected(FALSE);
-                Session->ConnectEvent.ResetTasks();
-                // DeleteSession();
+                ReleaseSession(Session, nLogicalProcessors);
                 break;
 
             case IOEventType::ACCEPT:
@@ -401,3 +441,50 @@ void ServerWindow::PostDisconnect(ClientSession *Session){
     Session->DisconnectEvent.Type = IOEventType::DISCONNECT;
     PostQueuedCompletionStatus(hcp, 0, (ULONG_PTR)Session, &Session->DisconnectEvent.ov);
 }
+
+void ServerWindow::CreateSessionPool(int Count){
+    bUse = new LONG[Count];
+    memset(bUse, 0, sizeof(LONG) * Count);
+
+    SessionPool = new ClientSession*[Count];
+    for(int i=0; i<Count; i++){
+        SessionPool[i] = new ClientSession();
+    }
+}
+
+void ServerWindow::DeleteSessionPool(int Count){
+    for(int i=0; i<Count; i++){
+        delete SessionPool[i];
+    }
+    delete [] SessionPool;
+    delete [] bUse;
+}
+
+ServerWindow::ClientSession* ServerWindow::GetSession(int Count){
+    for(int i=0; i<Count; i++){
+        if(InterlockedCompareExchange((LONG*)&bUse[i], 1, 0) == 0){
+            return SessionPool[i];
+        }
+    }
+
+    // 아래에 동적으로 세션을 추가하는 코드를 작성해도 좋다.
+    // 만약 세션을 동적으로 관리할 예정이라면 CRITICAL_SECTION을 이용해서 동기화 해야 한다.
+    return NULL;
+}
+
+void ServerWindow::ReleaseSession(ClientSession* Session, int Count){
+    for(int i=0; i<Count; i++){
+        if(SessionPool[i] == Session){
+            if(SessionPool[i]->GetSocket()){ 
+                closesocket(SessionPool[i]->GetSocket());
+            }
+
+            // 경쟁 조건(bUse[i] == 1)이 있을 때에는 인터락 함수를 활용해야 하나,
+            // 그렇지 않은 경우에는 곧장 값을 대입해도 상관없다.
+            // InterlockedCompareExchange((LONG*)&bUse[i], 0, 1);
+
+            bUse[i] = 0;
+        }
+    }
+}
+
