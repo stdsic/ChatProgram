@@ -50,12 +50,14 @@ LRESULT ServerWindow::OnCreate(WPARAM wParam, LPARAM lParam){
     hPannel = CreateWindow(L"static", NULL, WS_VISIBLE | WS_CHILD | WS_BORDER | WS_CLIPSIBLINGS, 0,0,0,0, _hWnd, NULL, GetModuleHandle(NULL), NULL);
     hChatEdit = CreateWindow(L"Edit", NULL, WS_VISIBLE | WS_CHILD | WS_BORDER | WS_CLIPSIBLINGS | WS_VSCROLL | ES_MULTILINE | ES_AUTOVSCROLL , 0,0,0,0, _hWnd, NULL, GetModuleHandle(NULL), NULL);
 
+    AllocConsole();
     Listening();
     PostAccept();
     return 0;
 }
 
 LRESULT ServerWindow::OnDestroy(WPARAM wParam, LPARAM lParam){
+    FreeConsole();
     if(GetWindowLongPtr(_hWnd, GWL_STYLE) & WS_OVERLAPPEDWINDOW){
         PostQuitMessage(0);
     }
@@ -173,12 +175,12 @@ void ServerWindow::Exception::GetErrorMessage(BOOL WSAError){
         ErrorCode = GetLastError();
     }
 
-    FormatMessage(
+    FormatMessageA(
             FORMAT_MESSAGE_ALLOCATE_BUFFER | FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS,
             NULL,
             ErrorCode,
             MAKELANGID(LANG_NEUTRAL, SUBLANG_DEFAULT),
-            (LPWSTR)&lpMsgBuf,
+            (LPSTR)&lpMsgBuf,
             0,
             NULL
             );
@@ -254,7 +256,6 @@ void ServerWindow::PostAccept(){
 
     for(int i=0; i<nLogicalProcessors; i++){
         ClientSession *NewSession = GetSession(nLogicalProcessors * 4);
-        if(!NewSession){ throw Exception(); }
         NewSession->SetSocket(CreateSocket());
 
         IOEvent *NewEvent = new IOEvent();
@@ -288,9 +289,12 @@ void ServerWindow::Processing(){
     ULONG_PTR Key;
 
     IOEvent *NewEvent = NULL;
-    BOOL bWork = GetQueuedCompletionStatus(hcp, &dwTrans, (PULONG_PTR)&Key, (OVERLAPPED**)&NewEvent, INFINITE);
-    ClientSession *Session = NewEvent->Session;
+    BOOL bWork = GetQueuedCompletionStatus(hcp, &dwTrans, (ULONG_PTR*)&Key, (OVERLAPPED**)&NewEvent, INFINITE);
+    static int i = 0;
+    ++i;
     IOEventType EventType = NewEvent->Type;
+    TypeHandler(EventType);
+    ClientSession *Session = NewEvent->Session;
 
     if(!bWork){
         DWORD dwError = GetLastError();
@@ -303,17 +307,19 @@ void ServerWindow::Processing(){
                 break;
 
             default:
-                // LogUnexpectedError(dwError);
                 PostDisconnect(Session);
                 break;
         }
-    }else if(bWork && dwTrans == 0 && EventType != IOEventType::DISCONNECT && EventType != IOEventType::CONNECT){
+    }else if(bWork && dwTrans == 0 && EventType == IOEventType::RECV){
         // 정상 종료
         PostDisconnect(Session);
     }else{
-        switch(NewEvent->Type){
+        switch(EventType){
             case IOEventType::CONNECT:
                 Session->SetConnected(TRUE);
+                Session->RecvEvent.ResetTasks();
+                Session->RecvEvent.Type = IOEventType::RECV;
+                CreateIoCompletionPort((HANDLE)Session->GetSocket(), hcp, 0, 0);
                 // 세션 풀로 관리하는 구조가 아니라면 여기서 세션을 추가하면 된다.
                 // AppendSession();
 
@@ -329,49 +335,13 @@ void ServerWindow::Processing(){
                             1,
                             &dwBytes,
                             &dwFlags,
-                            (OVERLAPPED*)&Session->RecvEvent.ov,
+                            (OVERLAPPED*)&Session->RecvEvent,
                             NULL
                             );
-                    if(ret == SOCKET_ERROR){
-                        DWORD dwError = WSAGetLastError();
-                        switch(dwError){
-                            case WSA_IO_PENDING:
-                                // 정상
-                                break;
 
-                            case WSAECONNRESET:
-                                // 클라이언트가 연결을 강제로 종료
-                                PostDisconnect(Session);
-                                break;
-
-                            case WSAESHUTDOWN:
-                                // 소켓이 이미 닫힘
-                                PostDisconnect(Session);
-                                break;
-
-                            case WSAENOTCONN:
-                                // 연결되지 않은 소켓
-                                PostDisconnect(Session);
-                                break;
-
-                            case WSAENOTSOCK:
-                                // 유효하지 않은 소켓
-                                PostDisconnect(Session);
-                                break;
-
-                            case WSAEMSGSIZE:
-                                // 버퍼 크기 초과
-                                break;
-
-                            case WSAEWOULDBLOCK:
-                                // 비동기 통신에서도 드물게 발생함
-                                break;
-
-                            default:
-                                // 알 수 없는 에러
-                                PostDisconnect(Session);
-                                break;
-                        }
+                    DWORD dwError = WSAGetLastError();
+                    if(ret == SOCKET_ERROR && dwError != WSA_IO_PENDING){
+                        ErrorHandler(dwError, Session);
                     }
                 }
                 break;
@@ -410,7 +380,6 @@ void ServerWindow::Processing(){
                     if(InetNtopW(AF_INET, &NewRemoteAddress.sin_addr, IP, INET_ADDRSTRLEN) != NULL){
                         // Show IP Address
 
-
                         // Post ConnectEvent
                         Session->SetRemoteAddress(NewRemoteAddress);
                         PostConnect(Session);
@@ -420,9 +389,11 @@ void ServerWindow::Processing(){
                 break;
 
             case IOEventType::RECV:
+                // BroadCast;
                 break;
 
             case IOEventType::SEND:
+                DebugMessage(L"send\n");
                 break;
         }
     }
@@ -475,16 +446,140 @@ ServerWindow::ClientSession* ServerWindow::GetSession(int Count){
 void ServerWindow::ReleaseSession(ClientSession* Session, int Count){
     for(int i=0; i<Count; i++){
         if(SessionPool[i] == Session){
+            EnterCriticalSection(&cs);
             if(SessionPool[i]->GetSocket()){ 
-                closesocket(SessionPool[i]->GetSocket());
+                shutdown(Session->GetSocket(), SD_BOTH);
+                closesocket(Session->GetSocket());
+                Session->SetSocket(INVALID_SOCKET);
             }
 
-            // 경쟁 조건(bUse[i] == 1)이 있을 때에는 인터락 함수를 활용해야 하나,
-            // 그렇지 않은 경우에는 곧장 값을 대입해도 상관없다.
-            // InterlockedCompareExchange((LONG*)&bUse[i], 0, 1);
-
             bUse[i] = 0;
+            memset(Session->GetRecvBuffer(), 0, sizeof(wchar_t) * Session->GetCapacity());
+            memset(Session->GetSendBuffer(), 0, sizeof(wchar_t) * Session->GetCapacity());
+            LeaveCriticalSection(&cs);
         }
     }
 }
 
+void ServerWindow::ErrorHandler(DWORD dwError, LPVOID lpArgs){
+    DebugMessage(L"Error Detected\n");
+    ClientSession* Session = (ClientSession*)lpArgs;
+
+    switch(dwError){
+        case WSA_IO_PENDING:
+            // 정상
+            break;
+
+        case WSAECONNRESET:
+            // 클라이언트가 연결을 강제로 종료
+            PostDisconnect(Session);
+            break;
+
+        case WSAESHUTDOWN:
+            // 소켓이 이미 닫힘
+            PostDisconnect(Session);
+            break;
+
+        case WSAENOTCONN:
+            // 연결되지 않은 소켓
+            PostDisconnect(Session);
+            break;
+
+        case WSAENOTSOCK:
+            // 유효하지 않은 소켓
+            PostDisconnect(Session);
+            break;
+
+        case WSAEMSGSIZE:
+            // 버퍼 크기 초과
+            DebugMessage(L"MSGSIZE IS TO BIG\n");
+            break;
+
+        case WSAEWOULDBLOCK:
+            // 비동기 통신에서도 드물게 발생함
+            break;
+
+        default:
+            // 알 수 없는 에러
+            PostDisconnect(Session);
+            break;
+    }
+}
+
+void ServerWindow::DebugMessage(LPCWSTR fmt, ...){
+    HANDLE hInput, hOutput, hError;
+
+    hInput = GetStdHandle(STD_INPUT_HANDLE);
+    hOutput = GetStdHandle(STD_OUTPUT_HANDLE);
+    hError = GetStdHandle(STD_ERROR_HANDLE);
+
+    WCHAR Debug[0x100];
+    va_list arg;
+    va_start(arg, fmt);
+    StringCbVPrintf(Debug, sizeof(Debug), fmt, arg);
+    va_end(arg);
+
+    DWORD dwWritten;
+    WriteConsole(hOutput, Debug, wcslen(Debug), &dwWritten, NULL);
+}
+
+void ServerWindow::TypeHandler(IOEventType Type){
+    switch(Type){
+        case IOEventType::CONNECT:
+            DebugMessage(L"IOEventType: CONNECT\n");
+            break;
+
+        case IOEventType::DISCONNECT:
+            DebugMessage(L"IOEventType: DISCONNECT\n");
+            break;
+
+        case IOEventType::ACCEPT:
+            DebugMessage(L"IOEventType: ACCEPT\n");
+            break;
+
+        case IOEventType::RECV:
+            DebugMessage(L"IOEventType: RECV\n");
+            break;
+
+        case IOEventType::SEND:
+            DebugMessage(L"IOEventType: SEND\n");
+            break;
+    }
+}
+
+void SeverWindow::BroadCast(int Count, wchar_t *SendData){
+    // 순회 구조로 인해 동일한 세션에 WSASend가 여러번 호출될 수 있다.
+    // 큐를 이용하여 중복을 방지하는 것이 좋으므로 void* 자료형을 데이터로 가지는 큐를 설계하기로 한다.
+    for(int i=0; i<Count; i++){
+        if(InterlockedCompareExchange((LONG*)&bUse[i], bUse[i], bUse[i]) == 1){
+            if(SessionPool[i]->IsConnected()){
+                EnterCriticalSection(&cs);
+                ClientSession* Session = SessionPool[i];
+                memcpy(Session->GetSendBuffer(), SendData, sizeof(wchar_t) * wcslen(SendData));
+
+                Session->SendEvent.ResetTasks();
+                Session->SendEvent.Type = IOEventType::RECV;
+
+                WSABUF buf;
+                buf.buf = Session->GetSendBuffer();
+                buf.len = sizeof(wchar_t) * wcslen(SendData);
+
+                DWORD dwBytes = 0, dwFlags = 0;
+                ret = WSASend(
+                        Session->GetSocket(),
+                        &buf,
+                        1,
+                        &dwBytes,
+                        dwFlags,
+                        (OVERLAPPED*)&Session->SendEvent
+                        );
+
+                DWORD dwError = WSAGetLastError();
+                if(ret == SOCKET_ERROR && dwError != WSA_IO_PENDING){
+                    ErrorHandler(dwError, Session);
+                }
+                LeaveCriticalSection(&cs);
+            }
+        }
+    }
+}

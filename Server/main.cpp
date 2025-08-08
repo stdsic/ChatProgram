@@ -1,5 +1,6 @@
 #include "ServerWindow.h"
 
+// int APIENTRY wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int nCmdShow){
 int APIENTRY wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int nCmdShow){
     try{
         ServerWindow Server;

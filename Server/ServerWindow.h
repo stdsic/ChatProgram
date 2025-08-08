@@ -30,9 +30,10 @@ private:
             static const int LocalAddressLength = sizeof(sockaddr_in) + 16;
             static const int RemoteAddressLength = sizeof(sockaddr_in) + 16;
             static const int OutputBufferLength = LocalAddressLength + RemoteAddressLength + PreReceiveDataLength;
+            static const int DefaultSize = 0x1000;
+            
         private:
             int Front, Rear, Capacity;
-            const int DefaultSize = 0x1000;
 
         private:
             LONG bConnected;
@@ -57,8 +58,10 @@ private:
             IOEvent DisconnectEvent;
 
         public:
-            ClientSession() : Front(0), Rear(0), Capacity(0), bConnected(0) {
-                Capacity = DefaultSize * 10;
+            void ResetEvent();
+
+        public:
+            ClientSession() : Front(0), Rear(0), Capacity(DefaultSize * 10), bConnected(0) {
                 RecvEvent.Type = IOEventType::RECV;
                 SendEvent.Type = IOEventType::SEND;
                 ConnectEvent.Type = IOEventType::CONNECT;
@@ -67,6 +70,7 @@ private:
                 memset(AcceptBuffer, 0, sizeof(AcceptBuffer));
                 RecvBuffer = (wchar_t*)malloc(sizeof(wchar_t) * Capacity);
                 SendBuffer = (wchar_t*)malloc(sizeof(wchar_t) * Capacity);
+
             }
 
             ~ClientSession(){
@@ -194,9 +198,17 @@ private:
     void CreateSessionPool(int Count);
     void DeleteSessionPool(int Count);
 
-public:
+private:
+    void DebugMessage(LPCWSTR fmt, ...);
+    void ErrorHandler(DWORD dwError, LPVOID lpArgs);
+    void TypeHandler(IOEventType Type);
+
+private:
     ClientSession* GetSession(int Count);
     void ReleaseSession(ClientSession* Session, int Count);
+
+private:
+    void BroadCast(int Count, wchar_t *Buffer);
 
 public:
     ServerWindow();
