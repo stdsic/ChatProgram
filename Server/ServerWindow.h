@@ -4,6 +4,7 @@
 #include <winsock2.h>
 #include <mswsock.h>
 #include "BaseWindow.h"
+#include "Queue.h"
 
 class ServerWindow : public BaseWindow<ServerWindow> {
     class ClientSession;
@@ -67,6 +68,11 @@ private:
                 ConnectEvent.Type = IOEventType::CONNECT;
                 DisconnectEvent.Type = IOEventType::DISCONNECT;
 
+                RecvEvent.Session = this;
+                SendEvent.Session = this;
+                ConnectEvent.Session = this;
+                DisconnectEvent.Session = this;
+
                 memset(AcceptBuffer, 0, sizeof(AcceptBuffer));
                 RecvBuffer = (wchar_t*)malloc(sizeof(wchar_t) * Capacity);
                 SendBuffer = (wchar_t*)malloc(sizeof(wchar_t) * Capacity);
@@ -106,7 +112,22 @@ private:
             int DataSize() const { return Front - Rear; }
             int FreeSize() const { return Capacity - Front; }
             int GetCapacity() const { return Capacity; }
-            static const int GetOutputBufferLength() { return OutputBufferLength; }
+            static int GetOutputBufferLength() { return OutputBufferLength; }
+
+        public:
+            void InitEvent(){
+                RecvEvent.ResetTasks();
+                SendEvent.ResetTasks();
+                ConnectEvent.ResetTasks();
+                DisconnectEvent.ResetTasks();
+            }
+
+            void InitThis(){
+                RecvEvent.Session = this;
+                SendEvent.Session = this;
+                ConnectEvent.Session = this;
+                DisconnectEvent.Session = this;
+            }
     };
 
 public:
@@ -167,6 +188,9 @@ private:
     struct sockaddr_in ServerAddress;
 
 private:
+    Queue *BroadCastQ, *ReleaseQ;
+
+private:
     static LPFN_ACCEPTEX lpfnAcceptEx;
     static LPFN_CONNECTEX lpfnConnectEx;
     static LPFN_DISCONNECTEX lpfnDisconnectEx;
@@ -205,10 +229,10 @@ private:
 
 private:
     ClientSession* GetSession(int Count);
-    void ReleaseSession(ClientSession* Session, int Count);
+    void ReleaseSession(int Count);
 
 private:
-    void BroadCast(int Count, wchar_t *Buffer);
+    void BroadCast(int Count);
 
 public:
     ServerWindow();

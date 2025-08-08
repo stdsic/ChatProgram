@@ -1,6 +1,7 @@
 #include "ServerWindow.h"
 #include <strsafe.h>
 #include <math.h>
+#define min(a,b) (((a) < (b)) ? (a) : (b))
 #define BUFSIZE 0x400
 
 LRESULT ServerWindow::Handler(UINT iMessage, WPARAM wParam, LPARAM lParam){
@@ -61,6 +62,7 @@ LRESULT ServerWindow::OnDestroy(WPARAM wParam, LPARAM lParam){
     if(GetWindowLongPtr(_hWnd, GWL_STYLE) & WS_OVERLAPPEDWINDOW){
         PostQuitMessage(0);
     }
+    delete this;
     return 0;
 }
 
@@ -119,6 +121,8 @@ ServerWindow::ServerWindow() : bCritical(FALSE), bRunning(FALSE), dwKeepAliveOpt
 
         memset(&l_LingerOption, 0, sizeof(linger));
         memset(&ServerAddress, 0, sizeof(sockaddr_in));
+        BroadCastQ = CreateQueue(0x1000);
+        ReleaseQ = CreateQueue(nLogicalProcessors * 4);
 
         SYSTEM_INFO si;
         GetSystemInfo(&si);
@@ -154,6 +158,8 @@ ServerWindow::~ServerWindow(){
         }
     }
 
+    if(ReleaseQ){ DestroyQueue(ReleaseQ); }
+    if(BroadCastQ){ DestroyQueue(BroadCastQ); }
     if(SessionPool){ DeleteSessionPool(nLogicalProcessors * 4); }
     if(hThread){ free(hThread); }
     if(dwThreadID){ free(dwThreadID); }
@@ -277,7 +283,7 @@ void ServerWindow::PostAccept(){
                     );
 
             if(ret == 0 && WSAGetLastError() != ERROR_IO_PENDING){
-                ReleaseSession(NewSession, nLogicalProcessors);
+                ReleaseSession(nLogicalProcessors);
                 delete NewEvent;
             }
         }
@@ -290,10 +296,8 @@ void ServerWindow::Processing(){
 
     IOEvent *NewEvent = NULL;
     BOOL bWork = GetQueuedCompletionStatus(hcp, &dwTrans, (ULONG_PTR*)&Key, (OVERLAPPED**)&NewEvent, INFINITE);
-    static int i = 0;
-    ++i;
     IOEventType EventType = NewEvent->Type;
-    TypeHandler(EventType);
+    // TypeHandler(EventType);
     ClientSession *Session = NewEvent->Session;
 
     if(!bWork){
@@ -319,14 +323,15 @@ void ServerWindow::Processing(){
                 Session->SetConnected(TRUE);
                 Session->RecvEvent.ResetTasks();
                 Session->RecvEvent.Type = IOEventType::RECV;
+                Session->RecvEvent.Session = Session;
                 CreateIoCompletionPort((HANDLE)Session->GetSocket(), hcp, 0, 0);
                 // 세션 풀로 관리하는 구조가 아니라면 여기서 세션을 추가하면 된다.
                 // AppendSession();
 
                 if(Session->IsConnected()){
                     WSABUF buf;
-                    buf.buf = (char*)Session->GetWritePosition();
-                    buf.len = sizeof(wchar_t) * Session->FreeSize();
+                    buf.buf = (char*)Session->GetRecvBuffer();
+                    buf.len = sizeof(wchar_t) * Session->GetCapacity();
 
                     DWORD dwBytes = 0, dwFlags = 0;
                     ret = WSARecv(
@@ -347,7 +352,8 @@ void ServerWindow::Processing(){
                 break;
 
             case IOEventType::DISCONNECT:
-                ReleaseSession(Session, nLogicalProcessors);
+                Enqueue(ReleaseQ, Session);
+                ReleaseSession(nLogicalProcessors);
                 break;
 
             case IOEventType::ACCEPT:
@@ -390,6 +396,35 @@ void ServerWindow::Processing(){
 
             case IOEventType::RECV:
                 // BroadCast;
+                if(Enqueue(BroadCastQ, Session)){
+                    BroadCast(nLogicalProcessors * 4);
+
+                    memset(Session->GetRecvBuffer(), 0, sizeof(wchar_t) * Session->GetCapacity());
+                    Session->RecvEvent.ResetTasks();
+                    Session->RecvEvent.Type = IOEventType::RECV;
+                    Session->RecvEvent.Session = Session;
+
+                    WSABUF buf;
+                    buf.buf = (char*)Session->GetRecvBuffer();
+                    buf.len = sizeof(wchar_t) * Session->GetCapacity();
+
+                    DWORD dwBytes = 0, dwFlags = 0;
+                    ret = WSARecv(
+                            Session->GetSocket(),
+                            &buf,
+                            1,
+                            &dwBytes,
+                            &dwFlags,
+                            (OVERLAPPED*)&Session->RecvEvent,
+                            NULL
+                            );
+
+                    DWORD dwError = WSAGetLastError();
+                    if(ret == SOCKET_ERROR && dwError != WSA_IO_PENDING){
+                        ErrorHandler(dwError, Session);
+                    }
+                    DebugMessage(L"Recv\n");
+                }
                 break;
 
             case IOEventType::SEND:
@@ -443,22 +478,25 @@ ServerWindow::ClientSession* ServerWindow::GetSession(int Count){
     return NULL;
 }
 
-void ServerWindow::ReleaseSession(ClientSession* Session, int Count){
-    for(int i=0; i<Count; i++){
-        if(SessionPool[i] == Session){
-            EnterCriticalSection(&cs);
-            if(SessionPool[i]->GetSocket()){ 
-                shutdown(Session->GetSocket(), SD_BOTH);
-                closesocket(Session->GetSocket());
-                Session->SetSocket(INVALID_SOCKET);
-            }
+void ServerWindow::ReleaseSession(int Count){
+    // 동일한 세션에 대해 같은 동작을 할 가능성이 있으므로 
+    // DISCONNECT 이벤트 발생시 ReleaseSession을 호출하기 전에 큐에 세션을 밀어넣고
+    // 하나씩 빼서 필요한 처리를 하도록 구조를 변경할 필요가 있다.
+    ClientSession* Session = (ClientSession*)Dequeue(ReleaseQ);
 
-            bUse[i] = 0;
-            memset(Session->GetRecvBuffer(), 0, sizeof(wchar_t) * Session->GetCapacity());
-            memset(Session->GetSendBuffer(), 0, sizeof(wchar_t) * Session->GetCapacity());
-            LeaveCriticalSection(&cs);
+    EnterCriticalSection(&cs);
+    if(Session != NULL){
+         if(Session->GetSocket()){ 
+            shutdown(Session->GetSocket(), SD_BOTH);
+            closesocket(Session->GetSocket());
+            Session->SetSocket(INVALID_SOCKET);
         }
+
+        for(int i=0; i<Count; i++){ if(SessionPool[i] == Session) { bUse[i] = 0; break; } } 
+        memset(Session->GetRecvBuffer(), 0, sizeof(wchar_t) * Session->GetCapacity());
+        memset(Session->GetSendBuffer(), 0, sizeof(wchar_t) * Session->GetCapacity());
     }
+    LeaveCriticalSection(&cs);
 }
 
 void ServerWindow::ErrorHandler(DWORD dwError, LPVOID lpArgs){
@@ -513,7 +551,7 @@ void ServerWindow::DebugMessage(LPCWSTR fmt, ...){
     hOutput = GetStdHandle(STD_OUTPUT_HANDLE);
     hError = GetStdHandle(STD_ERROR_HANDLE);
 
-    WCHAR Debug[0x100];
+    WCHAR Debug[0x1000];
     va_list arg;
     va_start(arg, fmt);
     StringCbVPrintf(Debug, sizeof(Debug), fmt, arg);
@@ -547,39 +585,37 @@ void ServerWindow::TypeHandler(IOEventType Type){
     }
 }
 
-void SeverWindow::BroadCast(int Count, wchar_t *SendData){
-    // 순회 구조로 인해 동일한 세션에 WSASend가 여러번 호출될 수 있다.
-    // 큐를 이용하여 중복을 방지하는 것이 좋으므로 void* 자료형을 데이터로 가지는 큐를 설계하기로 한다.
+void ServerWindow::BroadCast(int Count){
+    ClientSession* Session = (ClientSession*)Dequeue(BroadCastQ);
+    
+    EnterCriticalSection(&cs);
     for(int i=0; i<Count; i++){
-        if(InterlockedCompareExchange((LONG*)&bUse[i], bUse[i], bUse[i]) == 1){
-            if(SessionPool[i]->IsConnected()){
-                EnterCriticalSection(&cs);
-                ClientSession* Session = SessionPool[i];
-                memcpy(Session->GetSendBuffer(), SendData, sizeof(wchar_t) * wcslen(SendData));
+        if(SessionPool[i]->IsConnected()){
+            wcsncpy(SessionPool[i]->GetSendBuffer(), Session->GetRecvBuffer(), min(Session->GetCapacity() -1, wcslen(Session->GetRecvBuffer())));
 
-                Session->SendEvent.ResetTasks();
-                Session->SendEvent.Type = IOEventType::RECV;
+            SessionPool[i]->SendEvent.ResetTasks();
+            SessionPool[i]->SendEvent.Type = IOEventType::SEND;
 
-                WSABUF buf;
-                buf.buf = Session->GetSendBuffer();
-                buf.len = sizeof(wchar_t) * wcslen(SendData);
+            WSABUF buf;
+            buf.buf = (char*)SessionPool[i]->GetSendBuffer();
+            buf.len = sizeof(wchar_t) * wcslen(SessionPool[i]->GetSendBuffer());
 
-                DWORD dwBytes = 0, dwFlags = 0;
-                ret = WSASend(
-                        Session->GetSocket(),
-                        &buf,
-                        1,
-                        &dwBytes,
-                        dwFlags,
-                        (OVERLAPPED*)&Session->SendEvent
-                        );
+            DWORD dwBytes = 0, dwFlags = 0;
+            ret = WSASend(
+                    SessionPool[i]->GetSocket(),
+                    &buf,
+                    1,
+                    &dwBytes,
+                    dwFlags,
+                    (OVERLAPPED*)&Session->SendEvent,
+                    NULL
+                    );
 
-                DWORD dwError = WSAGetLastError();
-                if(ret == SOCKET_ERROR && dwError != WSA_IO_PENDING){
-                    ErrorHandler(dwError, Session);
-                }
-                LeaveCriticalSection(&cs);
+            DWORD dwError = WSAGetLastError();
+            if(ret == SOCKET_ERROR && dwError != WSA_IO_PENDING){
+                ErrorHandler(dwError, Session);
             }
         }
     }
+    LeaveCriticalSection(&cs);
 }

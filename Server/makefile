@@ -1,5 +1,5 @@
 CC = g++
-CPPFLAGS = -static-libgcc -static-libstdc++
+CPPFLAGS = -static-libgcc -static-libstdc++ -W -Wall -g
 
 OPT = -mwindows -municode
 LDLIBS = -lcomctl32 -lws2_32

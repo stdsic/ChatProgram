@@ -54,7 +54,8 @@ class BaseWindow {
 				HMENU hMenu = NULL
 		){
 			HINSTANCE hInst = GetModuleHandle(NULL);
-			WNDCLASSEX wcex = {0};
+			WNDCLASSEX wcex{};
+			// WNDCLASSEX wcex = {0,};
 
 			// 클래스가 이미 등록되어 있는 경우 함수는 실패하고 새로운 리소스를 할당하지 않는다.
 			// 다만, 메모리 누수로 인한 리소스 사용과 이로인한 잠금 현상, 충돌 현상 등이 발생해 cpu의 사용량이 증가한다.
