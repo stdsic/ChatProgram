@@ -117,6 +117,7 @@ INT_PTR CALLBACK DlgProc(HWND hWnd, UINT iMessage, WPARAM wParam, LPARAM lParam)
 			switch(LOWORD(wParam)){
 				case IDOK:
 					GetDlgItemText(hWnd, IDC_EDIT1, SendBuffer, BUFSIZE+1);
+                    SendBuffer[wcslen(SendBuffer)] = 0;
 					SetEvent(hSendEvent);
 					SetFocus(hEdit1);
 					SendMessage(hEdit1, EM_SETSEL, 0, -1);
