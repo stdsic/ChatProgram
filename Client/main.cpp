@@ -1,63 +1,170 @@
 #define _WIN32_WINNT 0x0A00
 #include <ws2tcpip.h>
-#include <windows.h>
 #include <winsock2.h>
-#include <stdio.h>
-#include <string.h>
+#include <windows.h>
+#include <strsafe.h>
 
+#define IDD_DIALOG 101
+#define IDC_EDIT1 1001
+#define IDC_EDIT2 1002
+
+#define SERVERIP L"127.0.0.1"
 #define SERVERPORT 9000
-#define BUFSIZE 40960
+#define BUFSIZE 0x1000 
 
-wchar_t *SERVERIP = L"127.0.0.1";
+HWND hEdit1,hEdit2,hSend;
+HANDLE hReadEvent, hSendEvent, hRecvThread, hSendThread;
 
-int wmain(int argc, wchar_t *argv[]){
-	WSADATA wsa;
-	if(WSAStartup(MAKEWORD(2,2), &wsa) != 0){return 1;};
+SOCKET sock;
+wchar_t SendBuffer[BUFSIZE+1];
+wchar_t RecvBuffer[BUFSIZE+1];
 
-	int retval;
+void ErrorQuit(const wchar_t* msg){
+	LPVOID lpMsgBuf;
 
-	if(argc > 1){SERVERIP = argv[1];}
-	
-	SOCKET sock = socket(AF_INET, SOCK_STREAM, 0);
-	if(sock == INVALID_SOCKET){printf("Invalidate Socket Handle\n"); exit(0);}
+	FormatMessage(
+				FORMAT_MESSAGE_ALLOCATE_BUFFER | FORMAT_MESSAGE_FROM_SYSTEM,
+				NULL,
+				WSAGetLastError(),
+				MAKELANGID(LANG_NEUTRAL, SUBLANG_DEFAULT),
+				(wchar_t*)&lpMsgBuf,
+                0,
+                NULL
+			);
 
-	struct sockaddr_in serveraddr={0};
-	serveraddr.sin_family = AF_INET;
-	InetPton(AF_INET, SERVERIP, &serveraddr.sin_addr);
-	serveraddr.sin_port = htons(SERVERPORT);
+	MessageBox(NULL, (const wchar_t*)lpMsgBuf, msg, MB_ICONERROR);
+	LocalFree(lpMsgBuf);
+	exit(1);
+}
 
-	retval = connect(sock, (struct sockaddr*)&serveraddr, sizeof(serveraddr));
-	if(retval == SOCKET_ERROR){printf("connect error\n"); exit(0);}
+void DisplayText(const wchar_t* fmt, ...){
+    wchar_t buf[BUFSIZE];
 
-	int len;
-	wchar_t buf[BUFSIZE+1];
+	va_list arg;
+	va_start(arg, fmt);
+	StringCbVPrintf(buf, sizeof(buf), fmt, arg);
+	va_end(arg);
 
-	while(1){
-		printf("\n[Input] : ");
-		if(fgetws(buf, sizeof(wchar_t) * BUFSIZE+1, stdin) == NULL){break;}
+	int Length = GetWindowTextLength(hEdit2);
+	SendMessage(hEdit2, EM_SETSEL, Length, Length);
+	SendMessage(hEdit2, EM_REPLACESEL, FALSE, (LPARAM)buf);
+}
 
-		len = wcslen(buf);
-		if(buf[len-1] == '\r'){buf[len-1] = 0;}
-		if(wcslen(buf) == 0){break;}
+void DisplayError(const wchar_t* err){
+	LPVOID lpMsgBuf;
+	wchar_t buf[BUFSIZE];
 
-		retval = send(sock, (char*)buf, sizeof(wchar_t) * wcslen(buf), 0);
-		if(retval == SOCKET_ERROR){printf("send error\n"); break;}
+	FormatMessage(
+				FORMAT_MESSAGE_ALLOCATE_BUFFER | FORMAT_MESSAGE_FROM_SYSTEM,
+				NULL,
+				WSAGetLastError(),
+				MAKELANGID(LANG_NEUTRAL, SUBLANG_DEFAULT),
+				(wchar_t*)&lpMsgBuf,
+				0,
+				NULL
+			);
 
-		printf("[TCP Client] %d Bytes Sending.\n", retval);
+	DisplayText(L"[%s] %s\r\n", err, buf);
+	LocalFree(lpMsgBuf);
+}
 
-		retval = recv(sock, (char*)buf, retval, MSG_WAITALL);
-		if(retval == SOCKET_ERROR){
-			printf("recv error\n");
+DWORD WINAPI RecvProc(LPVOID lpArg){
+    while(1){
+		int ret = recv(sock, (char*)RecvBuffer, sizeof(wchar_t) * BUFSIZE, 0);
+
+		if(ret == SOCKET_ERROR){
+			DisplayText(L"recv()");
 			break;
-		}else if(retval == 0){break;}
+		}else if(ret == 0){
+			break;
+		}
 
-		buf[retval] = 0;
-		printf("[TCP Client] %d Bytes Reciving.\n", retval);
-		printf("[Recv Data] %s\n", buf);
+		RecvBuffer[ret / sizeof(wchar_t)] = 0;
+		DisplayText(L"[TCP 클라이언트] %d 바이트를 받았습니다.\r\n", ret);
+		DisplayText(L"[받은 데이터] %s\r\n", RecvBuffer);
+    }
+
+    return 0;
+}
+
+DWORD WINAPI SendProc(LPVOID lpArg){
+	while(1){
+		WaitForSingleObject(hSendEvent, INFINITE);
+
+		// 보낼 데이터를 입력하지 않았을 때
+		if(wcslen(SendBuffer) == 0){
+			continue;
+		}
+
+		int ret = send(sock, (char*)SendBuffer, sizeof(wchar_t) * wcslen(SendBuffer), 0);
+		if(ret == SOCKET_ERROR){DisplayText(L"send()"); break;}
+		DisplayText(L"[TCP 클라이언트] %d 바이트를 보냈습니다.\r\n", ret);
 	}
 
-	closesocket(sock);
+	return 0;
+}
 
+INT_PTR CALLBACK DlgProc(HWND hWnd, UINT iMessage, WPARAM wParam, LPARAM lParam){
+	switch(iMessage){
+		case WM_INITDIALOG:
+			hEdit1 = GetDlgItem(hWnd, IDC_EDIT1);
+			hEdit2 = GetDlgItem(hWnd, IDC_EDIT2);
+			hSend = GetDlgItem(hWnd, IDOK);
+			SendMessage(hEdit1, EM_SETLIMITTEXT, BUFSIZE+1, 0);
+			return TRUE;
+
+		case WM_COMMAND:
+			switch(LOWORD(wParam)){
+				case IDOK:
+					GetDlgItemText(hWnd, IDC_EDIT1, SendBuffer, BUFSIZE+1);
+					SetEvent(hSendEvent);
+					SetFocus(hEdit1);
+					SendMessage(hEdit1, EM_SETSEL, 0, -1);
+					return TRUE;
+
+				case IDCANCEL:
+					closesocket(sock);
+					EndDialog(hWnd, IDCANCEL);
+					return TRUE;
+			}
+	}
+	return FALSE;
+}
+
+int APIENTRY wWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPWSTR lpszCmdLine, int nCmdShow){
+	WSADATA wsa;
+	if(WSAStartup(MAKEWORD(2,2), &wsa) != 0){ return 1; }
+
+	sock = socket(AF_INET, SOCK_STREAM, 0);
+	if(sock == INVALID_SOCKET){ErrorQuit(L"socket()");}
+
+	struct sockaddr_in serveraddr;
+	serveraddr.sin_port = htons(SERVERPORT);
+
+    IN_ADDR addr;
+    InetPton(AF_INET, SERVERIP, &addr);
+	serveraddr.sin_addr.s_addr = addr.s_addr;
+	serveraddr.sin_family = AF_INET;
+
+	int ret = connect(sock, (struct sockaddr*)&serveraddr, sizeof(serveraddr));
+	if(ret == SOCKET_ERROR){ErrorQuit(L"connect()");}
+
+	hReadEvent = CreateEvent(NULL, FALSE, TRUE, NULL);
+	hSendEvent= CreateEvent(NULL, FALSE, FALSE, NULL);
+
+	DWORD dwThreadID[2];	
+	hRecvThread = CreateThread(NULL, 0, RecvProc, 0, 0, &dwThreadID[0]);
+    hSendThread = CreateThread(NULL, 0, SendProc, 0, 0, &dwThreadID[1]);
+    CloseHandle(hRecvThread);
+    CloseHandle(hSendThread);
+
+	// Modal Dialog
+	DialogBox(GetModuleHandle(NULL), MAKEINTRESOURCE(IDD_DIALOG), HWND_DESKTOP, (DLGPROC)DlgProc);
+
+	CloseHandle(hReadEvent);
+	CloseHandle(hSendEvent);
+
+	if(sock){closesocket(sock);}
 	WSACleanup();
 	return 0;
 }
