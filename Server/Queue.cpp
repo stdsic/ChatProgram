@@ -43,7 +43,7 @@ ElementType Dequeue(Queue* Q){
     ElementType Item = Q->DataArray[Q->Front];
     Q->Front = (Q->Front + 1) % Q->Capacity;
     Q->Count--;
-
     LeaveCriticalSection(&Q->cs);
+
     return Item;
 }
