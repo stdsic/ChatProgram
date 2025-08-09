@@ -63,20 +63,10 @@ private:
 
         public:
             ClientSession() : Front(0), Rear(0), Capacity(DefaultSize * 10), bConnected(0) {
-                RecvEvent.Type = IOEventType::RECV;
-                SendEvent.Type = IOEventType::SEND;
-                ConnectEvent.Type = IOEventType::CONNECT;
-                DisconnectEvent.Type = IOEventType::DISCONNECT;
-
-                RecvEvent.Session = this;
-                SendEvent.Session = this;
-                ConnectEvent.Session = this;
-                DisconnectEvent.Session = this;
-
+                Init();
                 memset(AcceptBuffer, 0, sizeof(AcceptBuffer));
                 RecvBuffer = (wchar_t*)malloc(sizeof(wchar_t) * Capacity);
                 SendBuffer = (wchar_t*)malloc(sizeof(wchar_t) * Capacity);
-
             }
 
             ~ClientSession(){
@@ -120,6 +110,11 @@ private:
                 SendEvent.ResetTasks();
                 ConnectEvent.ResetTasks();
                 DisconnectEvent.ResetTasks();
+
+                RecvEvent.Type = IOEventType::RECV;
+                SendEvent.Type = IOEventType::SEND;
+                ConnectEvent.Type = IOEventType::CONNECT;
+                DisconnectEvent.Type = IOEventType::DISCONNECT;
             }
 
             void InitThis(){
@@ -127,6 +122,11 @@ private:
                 SendEvent.Session = this;
                 ConnectEvent.Session = this;
                 DisconnectEvent.Session = this;
+            }
+
+            void Init(){
+                InitEvent();
+                InitThis();
             }
     };
 
@@ -233,6 +233,7 @@ private:
 
 private:
     void BroadCast(int Count);
+    void SafeInit(ClientSession *Session, IOEventType EventType);
 
 public:
     ServerWindow();
