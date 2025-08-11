@@ -538,7 +538,6 @@ void ServerWindow::ReleaseSession(int Count){
         memset(Session->GetSendBuffer(), 0, sizeof(wchar_t) * Session->GetCapacity());
         Session->SetConnected(FALSE);
         Session->SetIOState(FALSE);
-        Session->SetRemain(FALSE);
         Session->Init();
     }
     LeaveCriticalSection(&cs);
@@ -637,25 +636,15 @@ void ServerWindow::TypeHandler(IOEventType Type){
     }
 }
 
-// CompletionPort 서버 모델에서 큐를 사용하지 않고 BroadCast를 구현할 때의 문제점을 살펴보자.
 void ServerWindow::BroadCast(int Count){
-    // 여러 클라이언트가 접속한 상황이라 가정한다.
-    // 아래 함수의 구조를 보면 WSASend는 접속해 있는 세션들을 대상으로 WSASend를 여러 번 호출한다.
-    // 하나의 클라이언트가 메세지를 보냈을 때 서버에서는 받아온 데이터를 접속해 있는 전체 세션에 전달하는데, 이때 문제가 발생한다.
-    // 클라이언트 하나가 데이터를 보내면 N개의 클라이언트를 대상으로 WSASend를 호출하고,
-    // 클라이언트 두 개가 데이터를 보내면 2N개의 클라이언트를 대상으로 WSASend를 호출한다.
-    // 이렇게만 해도 CompletionPort의 이벤트 큐에서 처리하지 못한 데이터가 쌓여 있을 수 있다.
-    // 때문에 CompletionPort 서버 모델은 작업 큐를 가지는게 기본이다.
+    // WSASend와 같은 비동기 함수를 호출할 때 주의해야할 것이 있다.
+    // OVERLAPPED 구조와 버퍼가 독립적이지 않은 구조일 경우 덮어쓰는 등의 문제가 발생할 수 있다.
+    // 해서, bSending 따위의 변수를 만들어 중첩 호출되지 않도록 관리한다.
 
-    // 애초에 공식 문서에서 다음과 같은 문구를 찾아볼 수 있다.
-    // “Processes that handle many concurrent asynchronous I/O requests can do so more quickly and efficiently by using I/O completion ports in conjunction with a pre-allocated thread pool…”
-    // “The system queues completed I/O requests to the completion port, and threads wait for these queued requests.”
-    // 영어를 잘 하진 않지만 뉘앙스를 보면, "서버 로직도 큐잉 기반으로 설계하면 CompletionPort 모델의 병렬성과 효율성을 최대한 활용할 수 있다"고 해석할 수 있다.
-    // 따라서, BroadCast 따위의 함수를 만들 때에는 큐 자료구조를 활용하는 것이 일반적이며, 권장되는 모델이라고 볼 수 있다.
-
-    // 현재 프로젝트는 최대 32~128개의 세션만을 수용하는 작은 규모의 서버이므로 간단한 구조로 설계해도 충분하다.
-    // for문 안의 마지막 if 분기를 보면 보내야 할 작업이 남아있는 경우 bRemaining 변수를 TRUE로 변경한다.
-    // 
+    // 또한, WSASend가 처리되지 않은 상태, 즉 bSending이 TRUE일 때 보내지 못한 데이터는
+    // 별도의 큐에 보관해두었다가 콜백 함수나 작업자 스레드를 이용해 처리하도록 만들면 무난히 동작하는 서버 프로그램을 설계할 수 있다.
+    
+    // 어처피 서버를 확장할 일이 생기면 구조를 더 세분화하여 전체 로직을 수정해야 하므로 일단은 여기까지만 구현하기로 하자.
 
     ClientSession* Session = (ClientSession*)Dequeue(BroadCastQ);
     if(Session == NULL){return;}
@@ -666,7 +655,7 @@ void ServerWindow::BroadCast(int Count){
         if(SessionPool[i] == Session){ continue; }
         if(!SessionPool[i]->IsConnected()){ continue; }
         if(SessionPool[i]->GetSocket() == INVALID_SOCKET){ continue; }
-        if(SessionPool[i]->IsSending()){ SessionPool[i]->SetRemain(TRUE); continue; }
+        if(SessionPool[i]->IsSending()){ /* Enqueue(RemainQ, Session->GetRecvBuffer()); */ continue; }
 
         memset(SessionPool[i]->GetSendBuffer(), 0, sizeof(wchar_t) * SessionPool[i]->GetCapacity());
 

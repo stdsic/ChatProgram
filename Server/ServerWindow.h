@@ -48,7 +48,7 @@ private:
             wchar_t AcceptBuffer[OutputBufferLength];
 
         private:
-            LONG bSending, bRemaining;
+            LONG bSending;
 
         public:
             // private으로 액세스 지정자를 변경하는 것이 좋다.
@@ -65,7 +65,7 @@ private:
             void ResetEvent();
 
         public:
-            ClientSession() : Front(0), Rear(0), Capacity(DefaultSize * 10), bConnected(0), bSending(0), bRemaining(0) {
+            ClientSession() : Front(0), Rear(0), Capacity(DefaultSize * 10), bConnected(0), bSending(0){ 
                 Init();
                 memset(AcceptBuffer, 0, sizeof(AcceptBuffer));
                 RecvBuffer = (wchar_t*)malloc(sizeof(wchar_t) * Capacity);
@@ -135,8 +135,6 @@ private:
         public:
             BOOL IsSending() const { return InterlockedCompareExchange((LONG*)&bSending, bSending, bSending); }
             void SetIOState(BOOL bValue) { InterlockedExchange(&bSending, bValue ? 1 : 0); }
-            BOOL IsRemaining() const { return InterlockedCompareExchange((LONG*)&bRemaining, bRemaining, bRemaining); }
-            void SetRemain(BOOL bValue) { InterlockedExchange(&bRemaining, bValue ? 1 : 0); }
     };
 
 public:
