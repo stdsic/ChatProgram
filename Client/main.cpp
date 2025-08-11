@@ -96,6 +96,7 @@ DWORD WINAPI SendProc(LPVOID lpArg){
 			continue;
 		}
 
+        SendBuffer[wcslen(SendBuffer)] = 0;
 		int ret = send(sock, (char*)SendBuffer, sizeof(wchar_t) * wcslen(SendBuffer), 0);
 		if(ret == SOCKET_ERROR){DisplayText(L"send()"); break;}
 		DisplayText(L"[TCP 클라이언트] %d 바이트를 보냈습니다.\r\n", ret);
@@ -117,7 +118,6 @@ INT_PTR CALLBACK DlgProc(HWND hWnd, UINT iMessage, WPARAM wParam, LPARAM lParam)
 			switch(LOWORD(wParam)){
 				case IDOK:
 					GetDlgItemText(hWnd, IDC_EDIT1, SendBuffer, BUFSIZE+1);
-                    SendBuffer[wcslen(SendBuffer)] = 0;
 					SetEvent(hSendEvent);
 					SetFocus(hEdit1);
 					SendMessage(hEdit1, EM_SETSEL, 0, -1);
