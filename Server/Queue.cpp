@@ -12,6 +12,9 @@ Queue *CreateQueue(int Capacity){
 }
 
 void DestroyQueue(Queue* Q){
+    for(int i=0; i<Q->Capacity; i++){
+        Q->DataArray[i] = NULL;
+    }
     free(Q->DataArray);
     DeleteCriticalSection(&Q->cs);
     free(Q);
