@@ -60,6 +60,7 @@ private:
             IOEvent SendEvent;
             IOEvent ConnectEvent;
             IOEvent DisconnectEvent;
+            IOEvent AcceptEvent;
 
         public:
             void ResetEvent();
@@ -75,7 +76,11 @@ private:
             ~ClientSession(){
                 if(RecvBuffer){ free(RecvBuffer); }
                 if(SendBuffer){ free(SendBuffer); }
-                if(client_sock){ closesocket(client_sock); }
+                if(client_sock){ 
+                    shutdown(client_sock, SD_BOTH);
+                    closesocket(client_sock); 
+                    client_sock = INVALID_SOCKET;
+                }
             }
 
         public:
@@ -113,11 +118,13 @@ private:
                 SendEvent.ResetTasks();
                 ConnectEvent.ResetTasks();
                 DisconnectEvent.ResetTasks();
+                AcceptEvent.ResetTasks();
 
                 RecvEvent.Type = IOEventType::RECV;
                 SendEvent.Type = IOEventType::SEND;
                 ConnectEvent.Type = IOEventType::CONNECT;
                 DisconnectEvent.Type = IOEventType::DISCONNECT;
+                DisconnectEvent.Type = IOEventType::ACCEPT;
             }
 
             void InitThis(){
@@ -125,6 +132,7 @@ private:
                 SendEvent.Session = this;
                 ConnectEvent.Session = this;
                 DisconnectEvent.Session = this;
+                AcceptEvent.Session = this;
             }
 
             void Init(){
@@ -173,7 +181,6 @@ private:
 private:
     BOOL bRunning;
     
-    HANDLE hShutdownEvent;
     CRITICAL_SECTION cs;
     BOOL bCritical;
 
@@ -181,7 +188,11 @@ private:
     DWORD *dwThreadID;
 
 private:
+    HWND hStatusText, hStartBtn, hStopBtn;
     HWND hPannel, hChatEdit;
+
+private:
+    RECT rcStatus, rcStartBtn, rcStopBtn;
     RECT rcPannel, rcChatEdit;
 
 private:
@@ -218,7 +229,8 @@ private:
     BOOL BindWSAFunction(SOCKET Socket, GUID Serial, LPVOID* lpfn);
 
 private:
-    BOOL Listening();
+    BOOL StartListening();
+    void StopListening();
     void PostAccept();
     void PostConnect(ClientSession *Session);
     void PostDisconnect(ClientSession *Session);
@@ -241,6 +253,11 @@ private:
 private:
     void BroadCast(int Count);
     void SafeInit(ClientSession *Session, IOEventType EventType);
+
+private:
+    void StartThreads();
+    void StopThreads();
+    void CancelAllPendingIO(int Count);
 
 public:
     ServerWindow();
