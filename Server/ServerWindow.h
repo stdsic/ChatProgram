@@ -47,6 +47,9 @@ private:
             wchar_t *SendBuffer;
             wchar_t AcceptBuffer[OutputBufferLength];
 
+        private:
+            LONG bSending, bRemaining;
+
         public:
             // private으로 액세스 지정자를 변경하는 것이 좋다.
             // 다만, 이렇게 되면 여러가지로 번거롭다.
@@ -62,7 +65,7 @@ private:
             void ResetEvent();
 
         public:
-            ClientSession() : Front(0), Rear(0), Capacity(DefaultSize * 10), bConnected(0) {
+            ClientSession() : Front(0), Rear(0), Capacity(DefaultSize * 10), bConnected(0), bSending(0), bRemaining(0) {
                 Init();
                 memset(AcceptBuffer, 0, sizeof(AcceptBuffer));
                 RecvBuffer = (wchar_t*)malloc(sizeof(wchar_t) * Capacity);
@@ -76,8 +79,8 @@ private:
             }
 
         public:
-            void SetConnected(BOOL bValue) { InterlockedExchange(&bConnected, bValue ? 1: 0); }
-            BOOL IsConnected() const { return InterlockedCompareExchange((LONG*)&bConnected, 0, 0) != 0; }
+            BOOL IsConnected() const { return InterlockedCompareExchange((LONG*)&bConnected, bConnected, bConnected); }
+            void SetConnected(BOOL bValue) { InterlockedExchange(&bConnected, bValue ? 1 : 0); }
 
         public:
             sockaddr_in GetLocalAddress() { return LocalAddress; }
@@ -128,6 +131,12 @@ private:
                 InitEvent();
                 InitThis();
             }
+
+        public:
+            BOOL IsSending() const { return InterlockedCompareExchange((LONG*)&bSending, bSending, bSending); }
+            void SetIOState(BOOL bValue) { InterlockedExchange(&bSending, bValue ? 1 : 0); }
+            BOOL IsRemaining() const { return InterlockedCompareExchange((LONG*)&bRemaining, bRemaining, bRemaining); }
+            void SetRemain(BOOL bValue) { InterlockedExchange(&bRemaining, bValue ? 1 : 0); }
     };
 
 public:

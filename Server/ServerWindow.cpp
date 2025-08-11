@@ -291,11 +291,6 @@ void ServerWindow::Processing(){
 
     IOEvent *NewEvent = NULL;
     ClientSession *Session = NULL;
-    BOOL bWork = GetQueuedCompletionStatus(hcp, &dwTrans, (ULONG_PTR*)&Key, (OVERLAPPED**)&NewEvent, INFINITE);
-
-    Session = NewEvent->Session;
-    IOEventType EventType = NewEvent->Type;
-
     WSABUF buf;
     DWORD dwError, dwBytes, dwFlags;
 
@@ -303,115 +298,33 @@ void ServerWindow::Processing(){
     wchar_t IP[INET_ADDRSTRLEN];
     struct sockaddr_in NewRemoteAddress;
 
-    if(bWork){
-        switch(EventType){
-            case IOEventType::CONNECT:
-                DebugMessage(L"CONNECT 이벤트가 발생하였습니다.\n");
-                if(Session == NULL){ DebugMessage(L"세션에 대한 포인터가 유효하지 않습니다.\n"); break;}
-                if(Session->IsConnected()){ DebugMessage(L"이미 연결된 세션을 대상으로 비정상적인 CONNECT 이벤트가 발생하였습니다.\n"); break; }
-                if(Session->GetSocket() == INVALID_SOCKET){ 
-                    DebugMessage(L"세션이 가진 소켓이 유효하지 않습니다.\n세션을 해제합니다.\n");
-                    PostDisconnect(Session); 
-                    break;
-                }
+    while(1){
+        BOOL bWork = GetQueuedCompletionStatus(hcp, &dwTrans, (ULONG_PTR*)&Key, (OVERLAPPED**)&NewEvent, INFINITE);
 
-                SafeInit(Session, IOEventType::RECV);
-                CreateIoCompletionPort((HANDLE)Session->GetSocket(), hcp, 0, 0);
-                Session->SetConnected(TRUE);
+        Session = NewEvent->Session;
+        IOEventType EventType = NewEvent->Type;
+        if(!bWork && NewEvent == NULL){ break; }
 
-                buf.buf = (char*)Session->GetRecvBuffer();
-                buf.len = sizeof(wchar_t) * Session->GetCapacity();
-
-                dwBytes = dwFlags = 0;
-                ret = WSARecv(
-                        Session->GetSocket(),
-                        &buf,
-                        1,
-                        &dwBytes,
-                        &dwFlags,
-                        (OVERLAPPED*)&Session->RecvEvent,
-                        NULL
-                        );
-
-                dwError = WSAGetLastError();
-                if(ret == SOCKET_ERROR && dwError != WSA_IO_PENDING){
-                    ErrorHandler(dwError, Session);
-                }
-                break;
-
-            case IOEventType::DISCONNECT:
-                DebugMessage(L"DISCONNECT 이벤트가 발생하였습니다.\n");
-                if(Session == NULL){ DebugMessage(L"세션에 대한 포인터가 유효하지 않습니다.\n"); break;}
-                if(!Enqueue(ReleaseQ, Session)){ DebugMessage(L"세션 해제 큐에 세션을 등록하지 못했습니다.\n"); break;}
-                ReleaseSession(nLogicalProcessors * 4);
-                break;
-
-            case IOEventType::ACCEPT:
-                DebugMessage(L"ACCEPT 이벤트가 발생하였습니다.\n");
-                if(Session == NULL){ DebugMessage(L"세션에 대한 포인터가 유효하지 않습니다.\n"); break;}
-
-                delete NewEvent;
-                if(setsockopt(
-                            Session->GetSocket(),
-                            SOL_SOCKET, SO_UPDATE_ACCEPT_CONTEXT,
-                            (const char*)&listen_sock,
-                            sizeof(listen_sock)
-                            ) == SOCKET_ERROR){
-                    DebugMessage(L"setsockopt 함수가 실패하였습니다.\n세션을 해제합니다.\n");
-                    delete Session;
-                    Session = NULL;
-                    PostAccept();
-                    break;
-                }
-
-                cbSize = sizeof(NewRemoteAddress);
-                if(getpeername(
-                            Session->GetSocket(),
-                            (struct sockaddr*)&NewRemoteAddress,
-                            &cbSize) == SOCKET_ERROR){
-                    DebugMessage(L"getpeername 함수가 실패하였습니다.\n세션을 해제합니다.\n");
-                    delete Session;
-                    Session = NULL;
-                    PostAccept();
-                    break;
-                }
-
-                if(InetNtopW(AF_INET, &NewRemoteAddress.sin_addr, IP, INET_ADDRSTRLEN) != NULL){
-                    // Show IP Address
-
-                    // Post ConnectEvent
-                    Session->SetRemoteAddress(NewRemoteAddress);
-                    PostConnect(Session);
-                }
-                PostAccept();
-                break;
-
-            case IOEventType::RECV:
-                DebugMessage(L"RECV 이벤트가 발생하였습니다.\n");
-                if(Session == NULL){ DebugMessage(L"세션에 대한 포인터가 유효하지 않습니다.\n"); break;}
-
-                if(dwTrans == 0){ 
-                    DebugMessage(L"클라이언트가 연결을 정상적으로 종료하였습니다(closesocket/shutdown).\n세션을 해제합니다.\n");
-                    PostDisconnect(Session);
-                    break;
-                }else{
-                    if(Session->GetSocket() == INVALID_SOCKET){
+        if(bWork){
+            switch(EventType){
+                case IOEventType::CONNECT:
+                    DebugMessage(L"CONNECT 이벤트가 발생하였습니다.\n");
+                    if(Session == NULL){ DebugMessage(L"세션에 대한 포인터가 유효하지 않습니다.\n"); break;}
+                    if(Session->IsConnected()){ DebugMessage(L"이미 연결된 세션을 대상으로 비정상적인 CONNECT 이벤트가 발생하였습니다.\n"); break; }
+                    if(Session->GetSocket() == INVALID_SOCKET){ 
                         DebugMessage(L"세션이 가진 소켓이 유효하지 않습니다.\n세션을 해제합니다.\n");
-                        PostDisconnect(Session);
+                        PostDisconnect(Session); 
                         break;
                     }
-                    if(!Enqueue(BroadCastQ, Session)){ DebugMessage(L"브로드 캐스트 전용 큐에 세션을 등록하지 못했습니다.\n"); break; }
-                    BroadCast(nLogicalProcessors * 4);
 
                     SafeInit(Session, IOEventType::RECV);
+                    CreateIoCompletionPort((HANDLE)Session->GetSocket(), hcp, 0, 0);
                     Session->SetConnected(TRUE);
-                    memset(Session->GetRecvBuffer(), 0, sizeof(wchar_t) * Session->GetCapacity());
 
                     buf.buf = (char*)Session->GetRecvBuffer();
                     buf.len = sizeof(wchar_t) * Session->GetCapacity();
 
-                    DebugMessage(L"WSARecv 함수를 호출하였습니다.\n");
-                    dwBytes = 0, dwFlags = 0;
+                    dwBytes = dwFlags = 0;
                     ret = WSARecv(
                             Session->GetSocket(),
                             &buf,
@@ -426,42 +339,133 @@ void ServerWindow::Processing(){
                     if(ret == SOCKET_ERROR && dwError != WSA_IO_PENDING){
                         ErrorHandler(dwError, Session);
                     }
-                }
-                break;
+                    break;
 
-            case IOEventType::SEND:
-                Session = NewEvent->Session;
-                DebugMessage(L"SEND 이벤트가 발생하였습니다.\n");
-                break;
-        }
-    }else{
-        DWORD dwError = GetLastError();
+                case IOEventType::DISCONNECT:
+                    DebugMessage(L"DISCONNECT 이벤트가 발생하였습니다.\n");
+                    if(Session == NULL){ DebugMessage(L"세션에 대한 포인터가 유효하지 않습니다.\n"); break;}
+                    if(!Enqueue(ReleaseQ, Session)){ DebugMessage(L"세션 해제 큐에 세션을 등록하지 못했습니다.\n"); break;}
+                    ReleaseSession(nLogicalProcessors * 4);
+                    break;
 
-        switch(dwError){
-            case ERROR_SUCCESS:
-                DebugMessage(L"클라이언트가 정상적으로 접속을 종료하였습니다(FALSE + ERROR_SUCCESS)\n");
-                PostDisconnect(Session);
-                break;
+                case IOEventType::ACCEPT:
+                    DebugMessage(L"ACCEPT 이벤트가 발생하였습니다.\n");
+                    if(Session == NULL){ DebugMessage(L"세션에 대한 포인터가 유효하지 않습니다.\n"); break;}
 
-            case ERROR_NETNAME_DELETED:         // 클라이언트가 연결을 끊음
-                DebugMessage(L"클라이언트와의 연결이 비정상적으로 종료되었습니다.\n프로세스 강제 종료 또는 방화벽, NAT, 네트워크 단절 등이 원인일 수 있습니다.\n");
-                PostDisconnect(Session);
-                break;
+                    delete NewEvent;
+                    if(setsockopt(
+                                Session->GetSocket(),
+                                SOL_SOCKET, SO_UPDATE_ACCEPT_CONTEXT,
+                                (const char*)&listen_sock,
+                                sizeof(listen_sock)
+                                ) == SOCKET_ERROR){
+                        DebugMessage(L"setsockopt 함수가 실패하였습니다.\n세션을 해제합니다.\n");
+                        delete Session;
+                        Session = NULL;
+                        PostAccept();
+                        break;
+                    }
 
-            case ERROR_CONNECTION_ABORTED:      // 연결이 비정상적으로 종료됨
-                DebugMessage(L"연결이 비정상적으로 종료되었습니다.\n");
-                PostDisconnect(Session);
-                break;
+                    cbSize = sizeof(NewRemoteAddress);
+                    if(getpeername(
+                                Session->GetSocket(),
+                                (struct sockaddr*)&NewRemoteAddress,
+                                &cbSize) == SOCKET_ERROR){
+                        DebugMessage(L"getpeername 함수가 실패하였습니다.\n세션을 해제합니다.\n");
+                        delete Session;
+                        Session = NULL;
+                        PostAccept();
+                        break;
+                    }
 
-            case ERROR_OPERATION_ABORTED:       // 작업이 취소됨 (CancelIoEx 등)
-                DebugMessage(L"I/O 작업이 취소되었습니다.\n");
-                PostDisconnect(Session);
-                break;
+                    if(InetNtopW(AF_INET, &NewRemoteAddress.sin_addr, IP, INET_ADDRSTRLEN) != NULL){
+                        // Show IP Address
 
-            default:
-                DebugMessage(L"알 수 없는 에러가 발생하였습니다.\n세션과의 연결을 종료합니다.\n");
-                PostDisconnect(Session);
-                break;
+                        // Post ConnectEvent
+                        Session->SetRemoteAddress(NewRemoteAddress);
+                        PostConnect(Session);
+                    }
+                    PostAccept();
+                    break;
+
+                case IOEventType::RECV:
+                    DebugMessage(L"RECV 이벤트가 발생하였습니다.\n");
+                    if(Session == NULL){ DebugMessage(L"세션에 대한 포인터가 유효하지 않습니다.\n"); break;}
+
+                    if(dwTrans == 0){ 
+                        DebugMessage(L"클라이언트가 연결을 정상적으로 종료하였습니다(closesocket/shutdown).\n세션을 해제합니다.\n");
+                        PostDisconnect(Session);
+                        break;
+                    }else{
+                        if(Session->GetSocket() == INVALID_SOCKET){
+                            DebugMessage(L"세션이 가진 소켓이 유효하지 않습니다.\n세션을 해제합니다.\n");
+                            PostDisconnect(Session);
+                            break;
+                        }
+                        if(!Enqueue(BroadCastQ, Session)){ DebugMessage(L"브로드 캐스트 전용 큐에 세션을 등록하지 못했습니다.\n"); break; }
+                        BroadCast(nLogicalProcessors * 4);
+
+                        SafeInit(Session, IOEventType::RECV);
+                        Session->SetConnected(TRUE);
+                        memset(Session->GetRecvBuffer(), 0, sizeof(wchar_t) * Session->GetCapacity());
+
+                        buf.buf = (char*)Session->GetRecvBuffer();
+                        buf.len = sizeof(wchar_t) * Session->GetCapacity();
+
+                        DebugMessage(L"WSARecv 함수를 호출하였습니다.\n");
+                        dwBytes = 0, dwFlags = 0;
+                        ret = WSARecv(
+                                Session->GetSocket(),
+                                &buf,
+                                1,
+                                &dwBytes,
+                                &dwFlags,
+                                (OVERLAPPED*)&Session->RecvEvent,
+                                NULL
+                                );
+
+                        dwError = WSAGetLastError();
+                        if(ret == SOCKET_ERROR && dwError != WSA_IO_PENDING){
+                            ErrorHandler(dwError, Session);
+                        }
+                    }
+                    break;
+
+                case IOEventType::SEND:
+                    Session = NewEvent->Session;
+                    if(Session->IsSending() == TRUE){ Session->SetIOState(FALSE); }
+                    DebugMessage(L"SEND 이벤트가 발생하였습니다.\n");
+                    break;
+            }
+        }else{
+            DWORD dwError = GetLastError();
+
+            switch(dwError){
+                case ERROR_SUCCESS:
+                    DebugMessage(L"클라이언트가 정상적으로 접속을 종료하였습니다(FALSE + ERROR_SUCCESS)\n");
+                    PostDisconnect(Session);
+                    break;
+
+                case ERROR_NETNAME_DELETED:         // 클라이언트가 연결을 끊음
+                    DebugMessage(L"클라이언트와의 연결이 비정상적으로 종료되었습니다.\n프로세스 강제 종료 또는 방화벽, NAT, 네트워크 단절 등이 원인일 수 있습니다.\n");
+                    PostDisconnect(Session);
+                    break;
+
+                case ERROR_CONNECTION_ABORTED:      // 연결이 비정상적으로 종료됨
+                    DebugMessage(L"연결이 비정상적으로 종료되었습니다.\n");
+                    PostDisconnect(Session);
+                    break;
+
+                case ERROR_OPERATION_ABORTED:       // 작업이 취소됨 (CancelIoEx 등)
+                    DebugMessage(L"I/O 작업이 취소되었습니다.\n");
+                    PostDisconnect(Session);
+                    break;
+
+                default:
+                    DebugMessage(L"알 수 없는 에러가 발생하였습니다.\n세션과의 연결을 종료합니다.\n");
+                    PostDisconnect(Session);
+                    break;
+            }
         }
     }
 }
@@ -532,6 +536,9 @@ void ServerWindow::ReleaseSession(int Count){
         for(int i=0; i<Count; i++){ if(SessionPool[i] == Session){ bUse[i] = 0; break; } } 
         memset(Session->GetRecvBuffer(), 0, sizeof(wchar_t) * Session->GetCapacity());
         memset(Session->GetSendBuffer(), 0, sizeof(wchar_t) * Session->GetCapacity());
+        Session->SetConnected(FALSE);
+        Session->SetIOState(FALSE);
+        Session->SetRemain(FALSE);
         Session->Init();
     }
     LeaveCriticalSection(&cs);
@@ -634,8 +641,7 @@ void ServerWindow::TypeHandler(IOEventType Type){
 void ServerWindow::BroadCast(int Count){
     // 여러 클라이언트가 접속한 상황이라 가정한다.
     // 아래 함수의 구조를 보면 WSASend는 접속해 있는 세션들을 대상으로 WSASend를 여러 번 호출한다.
-    // 하나의 클라이언트가 메세지를 보냈을 때 서버에서는 받아온 데이터를 접속해 있는 전체 세션에 전달하는데,
-    // 이때 문제가 발생한다.
+    // 하나의 클라이언트가 메세지를 보냈을 때 서버에서는 받아온 데이터를 접속해 있는 전체 세션에 전달하는데, 이때 문제가 발생한다.
     // 클라이언트 하나가 데이터를 보내면 N개의 클라이언트를 대상으로 WSASend를 호출하고,
     // 클라이언트 두 개가 데이터를 보내면 2N개의 클라이언트를 대상으로 WSASend를 호출한다.
     // 이렇게만 해도 CompletionPort의 이벤트 큐에서 처리하지 못한 데이터가 쌓여 있을 수 있다.
@@ -647,14 +653,20 @@ void ServerWindow::BroadCast(int Count){
     // 영어를 잘 하진 않지만 뉘앙스를 보면, "서버 로직도 큐잉 기반으로 설계하면 CompletionPort 모델의 병렬성과 효율성을 최대한 활용할 수 있다"고 해석할 수 있다.
     // 따라서, BroadCast 따위의 함수를 만들 때에는 큐 자료구조를 활용하는 것이 일반적이며, 권장되는 모델이라고 볼 수 있다.
 
+    // 현재 프로젝트는 최대 32~128개의 세션만을 수용하는 작은 규모의 서버이므로 간단한 구조로 설계해도 충분하다.
+    // for문 안의 마지막 if 분기를 보면 보내야 할 작업이 남아있는 경우 bRemaining 변수를 TRUE로 변경한다.
+    // 
+
     ClientSession* Session = (ClientSession*)Dequeue(BroadCastQ);
     if(Session == NULL){return;}
     
     EnterCriticalSection(&cs);
     for(int i=0; i<Count; i++){
         if(SessionPool[i] == NULL){ continue; }
+        if(SessionPool[i] == Session){ continue; }
         if(!SessionPool[i]->IsConnected()){ continue; }
         if(SessionPool[i]->GetSocket() == INVALID_SOCKET){ continue; }
+        if(SessionPool[i]->IsSending()){ SessionPool[i]->SetRemain(TRUE); continue; }
 
         memset(SessionPool[i]->GetSendBuffer(), 0, sizeof(wchar_t) * SessionPool[i]->GetCapacity());
 
@@ -672,6 +684,7 @@ void ServerWindow::BroadCast(int Count){
         buf.len = sizeof(wchar_t) * wcslen(SessionPool[i]->GetSendBuffer());
 
         DebugMessage(L"WSASend 함수를 호출하였습니다.\n");
+
         DWORD dwBytes = 0, dwFlags = 0;
         ret = WSASend(
                 SessionPool[i]->GetSocket(),
@@ -687,6 +700,7 @@ void ServerWindow::BroadCast(int Count){
         if(ret == SOCKET_ERROR && dwError != WSA_IO_PENDING){
             ErrorHandler(dwError, Session);
         }
+        SessionPool[i]->SetIOState(TRUE);
     }
     LeaveCriticalSection(&cs);
 }
