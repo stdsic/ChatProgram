@@ -6,6 +6,23 @@
 #include "BaseWindow.h"
 #include "Queue.h"
 
+/*
+   입출력 완료 포트 모델은 소켓 모드 설정 불필요하다.
+   설정 후 Async I/O 오류 발생, 커널 수준의 비동기 입출력과 비동기 통지를 이용하므로 넌블로킹 소켓일 경우 충돌이 발생한다.
+   비동기 함수를 이용해 MSG_WAITALL 등의 플래그로 확인해본 결과 오류가 발생하지 않는 것으로 보아,
+   넌블로킹 소켓이 아님을 알 수 있으며 기본적으로 블로킹 소켓을 필요로 한다.
+
+   ULONG On = 1;
+   ret = ioctlsocket(sock, AF_INET, FIONBIO, &On);
+   if(ret == SOCKET_ERROR){ShowError(L"ioctlsocket()"); return 1;}
+
+   KeepAlive
+   | OS        | 최초 검사 대기시간 | 패킷 간격 | 재시도 횟수 |
+   |-----------|--------------------|-----------|-------------|
+   | Windows   | 약 2시간           | 1초       | 10회        |
+   | Linux     | 7200초             | 75초      | 9회         |
+*/
+
 class ServerWindow : public BaseWindow<ServerWindow> {
     class ClientSession;
 
@@ -48,7 +65,7 @@ private:
             wchar_t AcceptBuffer[OutputBufferLength];
 
         private:
-            LONG bSending;
+            LONG iPending;
 
         public:
             // private으로 액세스 지정자를 변경하는 것이 좋다.
@@ -61,13 +78,15 @@ private:
             IOEvent ConnectEvent;
             IOEvent DisconnectEvent;
             IOEvent AcceptEvent;
+            HANDLE hDownEvent;
 
         public:
             void ResetEvent();
 
         public:
-            ClientSession() : Front(0), Rear(0), Capacity(DefaultSize * 10), bConnected(0), bSending(0){ 
+            ClientSession() : Front(0), Rear(0), Capacity(DefaultSize * 10), bConnected(0), iPending(0), hDownEvent(NULL){ 
                 Init();
+                hDownEvent = CreateEvent(NULL, TRUE, TRUE, NULL);
                 memset(AcceptBuffer, 0, sizeof(AcceptBuffer));
                 RecvBuffer = (wchar_t*)malloc(sizeof(wchar_t) * Capacity);
                 SendBuffer = (wchar_t*)malloc(sizeof(wchar_t) * Capacity);
@@ -76,11 +95,7 @@ private:
             ~ClientSession(){
                 if(RecvBuffer){ free(RecvBuffer); }
                 if(SendBuffer){ free(SendBuffer); }
-                if(client_sock){ 
-                    shutdown(client_sock, SD_BOTH);
-                    closesocket(client_sock); 
-                    client_sock = INVALID_SOCKET;
-                }
+                if(client_sock){ closesocket(client_sock); }
             }
 
         public:
@@ -113,36 +128,21 @@ private:
             static int GetOutputBufferLength() { return OutputBufferLength; }
 
         public:
-            void InitEvent(){
-                RecvEvent.ResetTasks();
-                SendEvent.ResetTasks();
-                ConnectEvent.ResetTasks();
-                DisconnectEvent.ResetTasks();
-                AcceptEvent.ResetTasks();
-
-                RecvEvent.Type = IOEventType::RECV;
-                SendEvent.Type = IOEventType::SEND;
-                ConnectEvent.Type = IOEventType::CONNECT;
-                DisconnectEvent.Type = IOEventType::DISCONNECT;
-                DisconnectEvent.Type = IOEventType::ACCEPT;
-            }
-
-            void InitThis(){
-                RecvEvent.Session = this;
-                SendEvent.Session = this;
-                ConnectEvent.Session = this;
-                DisconnectEvent.Session = this;
-                AcceptEvent.Session = this;
-            }
-
-            void Init(){
-                InitEvent();
-                InitThis();
-            }
+            void InitEvent();
+            void InitThis();
+            void Init();
 
         public:
-            BOOL IsSending() const { return InterlockedCompareExchange((LONG*)&bSending, bSending, bSending); }
-            void SetIOState(BOOL bValue) { InterlockedExchange(&bSending, bValue ? 1 : 0); }
+            BOOL IsPending() const { return InterlockedCompareExchange((LONG*)&iPending, iPending, iPending) != 0; }
+            void AddPending() { 
+                int prev = InterlockedIncrement((LONG*)&iPending) - 1;
+                if(prev == 0){ ::ResetEvent(hDownEvent); }
+            }
+
+            void SubPending() { 
+                int prev = InterlockedDecrement((LONG*)&iPending) + 1;
+                if(prev == 1){ ::SetEvent(hDownEvent); }
+            }
     };
 
 public:
@@ -179,8 +179,6 @@ private:
     };
 
 private:
-    BOOL bRunning;
-    
     CRITICAL_SECTION cs;
     BOOL bCritical;
 
@@ -198,7 +196,7 @@ private:
 private:
     WSADATA wsa;
     SOCKET listen_sock, Dummy;
-    int nLogicalProcessors, ret;
+    int nLogicalProcessors, nSessions, nWorkerThreads, ret;
 
     DWORD dwKeepAliveOption;
     DWORD dwReuseAddressOption;
@@ -238,26 +236,33 @@ private:
 private:
     LONG *bUse;
     ClientSession **SessionPool;
-    void CreateSessionPool(int Count);
-    void DeleteSessionPool(int Count);
+    void CreateSessionPool();
+    void DeleteSessionPool();
 
 private:
     void DebugMessage(LPCWSTR fmt, ...);
-    void ErrorHandler(DWORD dwError, LPVOID lpArgs);
-    void TypeHandler(IOEventType Type);
+    void HandleError(DWORD dwError);
+    void PrintEventType(IOEventType Type);
+    void HandlePacket(DWORD dwTransferred, LPVOID lpArgs);
 
 private:
-    ClientSession* GetSession(int Count);
-    void ReleaseSession(int Count);
+    ClientSession* GetSession();
+    void ReleaseSession();
 
 private:
-    void BroadCast(int Count);
+    void BroadCast();
     void SafeInit(ClientSession *Session, IOEventType EventType);
 
 private:
     void StartThreads();
     void StopThreads();
-    void CancelAllPendingIO(int Count);
+
+private:
+    void OnAccept(ClientSession* Session);
+    void OnConnect(ClientSession* Session);
+    void OnDisconnect(ClientSession* Session);
+    void OnRecv(ClientSession* Session);
+    void OnSend(ClientSession* Session);
 
 public:
     ServerWindow();
