@@ -21,7 +21,7 @@ OUT_RSRCS = $(addprefix $(RSRCDIR)/, $(RSRCS))
 OUT_RES = $(join $(OBJDIR)/, resource.res)
 
 MAIN = $(SRCDIR)/main.cpp
-EXEC = ChatHub
+EXEC = ChathubServer
 TARGET = $(EXEDIR)/$(EXEC).exe
 
 $(TARGET): $(MAIN) $(OUT_OBJS) $(OUT_RES)
