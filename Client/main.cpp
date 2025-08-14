@@ -1,12 +1,9 @@
 #define _WIN32_WINNT 0x0A00
+#include "resource.h"
 #include <ws2tcpip.h>
 #include <winsock2.h>
 #include <windows.h>
 #include <strsafe.h>
-
-#define IDD_DIALOG 101
-#define IDC_EDIT1 1001
-#define IDC_EDIT2 1002
 
 #define SERVERIP L"127.0.0.1"
 #define SERVERPORT 9000
@@ -80,8 +77,7 @@ DWORD WINAPI RecvProc(LPVOID lpArg){
 		}
 
 		RecvBuffer[ret / sizeof(wchar_t)] = 0;
-		DisplayText(L"[TCP 클라이언트] %d 바이트를 받았습니다.\r\n", ret);
-		DisplayText(L"[받은 데이터] %s\r\n", RecvBuffer);
+		DisplayText(L"[Recv] %s\r\n", RecvBuffer);
     }
 
     return 0;
@@ -99,7 +95,7 @@ DWORD WINAPI SendProc(LPVOID lpArg){
         SendBuffer[wcslen(SendBuffer)] = 0;
 		int ret = send(sock, (char*)SendBuffer, sizeof(wchar_t) * wcslen(SendBuffer), 0);
 		if(ret == SOCKET_ERROR){DisplayText(L"send()"); break;}
-		DisplayText(L"[TCP 클라이언트] %d 바이트를 보냈습니다.\r\n", ret);
+		DisplayText(L"[Send] %s\r\n", SendBuffer);
 	}
 
 	return 0;
