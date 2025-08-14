@@ -13,27 +13,11 @@ class BaseWindow {
 		virtual LRESULT Handler(UINT iMessage, WPARAM wParam, LPARAM lParam) = 0;
 
 	public:
-        void OnIdle(){
-            SendMessage(_hWnd, WM_ONIDLEMSG, 0,0);
-        }
-
         void RunMessageLoop(){
             MSG msg;
-            BOOL bAllowIdle = TRUE;
-            while(1){
-                if(PeekMessage(&msg, NULL, 0, 0, PM_REMOVE)){
-                    if(msg.message == WM_QUIT){break;}
-                    bAllowIdle = TRUE;
-                    TranslateMessage(&msg);
-                    DispatchMessage(&msg);
-                }else{
-                    if(bAllowIdle){
-                        // Callback
-                        OnIdle();
-                        bAllowIdle = FALSE;
-                    }
-                    WaitMessage();
-                }
+            while(GetMessage(&msg, NULL, 0,0)){
+                TranslateMessage(&msg);
+                DispatchMessage(&msg);
             }
         }
 
