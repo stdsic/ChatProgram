@@ -86,8 +86,12 @@ LRESULT ServerWindow::OnCommand(WPARAM wParam, LPARAM lParam){
     return 0;
 }
 
-LRESULT ServerWindow::OnIdleMsg(WPARAM wParam, LPARAM lParam){
-    OnServerIdle();
+LRESULT ServerWindow::OnTimer(WPARAM wParam, LPARAM lParam){
+    switch(wParam){
+        case 1:
+            OnDraw();
+            break;
+    }
     return 0;
 }
 
@@ -97,10 +101,12 @@ LRESULT ServerWindow::OnCreate(WPARAM wParam, LPARAM lParam){
     hStatusText = CreateWindowEx(0, L"static", L"🟢 Server Running | Clients: 0", WS_CHILD | WS_VISIBLE | SS_LEFT, 0,0,0,0, _hWnd, NULL, GetModuleHandle(NULL), NULL);
     hStartBtn = CreateWindowEx(0, L"button", L"Start", WS_CHILD | WS_VISIBLE, 0,0,0,0, _hWnd, (HMENU)(INT_PTR)IDC_BTNSTART, GetModuleHandle(NULL), NULL);
     hStopBtn = CreateWindowEx(0, L"button", L"Stop", WS_CHILD | WS_VISIBLE, 0,0,0,0, _hWnd, (HMENU)(INT_PTR)IDC_BTNSTOP, GetModuleHandle(NULL), NULL);
+    SetTimer(_hWnd, 1, 10, NULL);
     return 0;
 }
 
 LRESULT ServerWindow::OnDestroy(WPARAM wParam, LPARAM lParam){
+    KillTimer(_hWnd, 1);
     if(GetWindowLongPtr(_hWnd, GWL_STYLE) & WS_OVERLAPPEDWINDOW){
         PostQuitMessage(0);
     }
@@ -961,8 +967,13 @@ void ServerWindow::Processing(){
 ////
 ///////////////////////////////////////////////////////////////////////////////////////////////////////////////
 
-void ServerWindow::OnServerIdle(){
-    wchar_t Status[0x100];
+void ServerWindow::OnDraw(){
+    static wchar_t Status[0x100] = {0,};
+    static wchar_t PrevStatus[0x100] = {0,};
+
+    GetWindowText(hStatusText, PrevStatus, 0x100);
     StringCbPrintf(Status, sizeof(Status), L"🟢 Server Running | Clients: %d", nConnected);
+
+    if(wcscmp(Status, PrevStatus) == 0){ return; }
     SetWindowText(hStatusText, Status);
 }

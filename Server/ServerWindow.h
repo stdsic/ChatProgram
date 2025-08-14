@@ -171,10 +171,10 @@ private:
 
     // QUERYENDSESSION
     MSGMAP MainMsg[_nMsg] = {
-        {WM_SIZE, &ServerWindow::OnSize},
+        {WM_TIMER, &ServerWindow::OnTimer},
         {WM_PAINT, &ServerWindow::OnPaint},
+        {WM_SIZE, &ServerWindow::OnSize},
         {WM_COMMAND, &ServerWindow::OnCommand},
-        {WM_ONIDLEMSG, &ServerWindow::OnIdleMsg},
         {WM_CREATE, &ServerWindow::OnCreate},
         {WM_DESTROY, &ServerWindow::OnDestroy},
     };
@@ -217,10 +217,10 @@ private:
 
 private:
     LPCWSTR ClassName() const { return L"ChatHub Window Class"; }
-    LRESULT OnSize(WPARAM wParam, LPARAM lParam);
+    LRESULT OnTimer(WPARAM wParam, LPARAM lParam);
     LRESULT OnPaint(WPARAM wParam, LPARAM lParam);
+    LRESULT OnSize(WPARAM wParam, LPARAM lParam);
     LRESULT OnCommand(WPARAM wParam, LPARAM lParam);
-    LRESULT OnIdleMsg(WPARAM wParam, LPARAM lParam);
     LRESULT OnCreate(WPARAM wParam, LPARAM lParam);
     LRESULT OnDestroy(WPARAM wParam, LPARAM lParam);
 
@@ -273,7 +273,7 @@ public:
     LRESULT Handler(UINT iMessage, WPARAM wParam, LPARAM lParam);
     static DWORD WINAPI WorkerThreadHandler(LPVOID lpArg);
     void Processing();
-    void OnServerIdle();
+    void OnDraw();
 };
 
 #endif
