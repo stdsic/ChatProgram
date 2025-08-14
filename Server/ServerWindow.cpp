@@ -162,6 +162,17 @@ ServerWindow::ServerWindow() : bCritical(FALSE), dwKeepAliveOption(1), dwReuseAd
 }
 
 ServerWindow::~ServerWindow(){
+    StopListening();
+    for(int i=0; i<nSessions; i++){
+        if(SessionPool[i]){
+            // DebugMessage(L"Call Enqueue = %d\r\n", i);
+            Enqueue(ReleaseQ, SessionPool[i]);
+        }
+    }
+    for(int i=0; i<nSessions; i++){
+        // DebugMessage(L"Call ReleaseSession = %d\r\n", i);
+        ReleaseSession();
+    }
     StopThreads();
 
     if(ReleaseQ){ DestroyQueue(ReleaseQ); }
