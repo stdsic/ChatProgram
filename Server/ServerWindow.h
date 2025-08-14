@@ -64,7 +64,7 @@ private:
             wchar_t *SendBuffer;
             wchar_t AcceptBuffer[OutputBufferLength];
 
-        private:
+        public:
             LONG iPending;
 
         public:
@@ -174,6 +174,7 @@ private:
         {WM_SIZE, &ServerWindow::OnSize},
         {WM_PAINT, &ServerWindow::OnPaint},
         {WM_COMMAND, &ServerWindow::OnCommand},
+        {WM_ONIDLEMSG, &ServerWindow::OnIdleMsg},
         {WM_CREATE, &ServerWindow::OnCreate},
         {WM_DESTROY, &ServerWindow::OnDestroy},
     };
@@ -196,7 +197,7 @@ private:
 private:
     WSADATA wsa;
     SOCKET listen_sock, Dummy;
-    int nLogicalProcessors, nSessions, nWorkerThreads, ret;
+    int nLogicalProcessors, nSessions, nWorkerThreads, nConnected, ret;
 
     DWORD dwKeepAliveOption;
     DWORD dwReuseAddressOption;
@@ -219,6 +220,7 @@ private:
     LRESULT OnSize(WPARAM wParam, LPARAM lParam);
     LRESULT OnPaint(WPARAM wParam, LPARAM lParam);
     LRESULT OnCommand(WPARAM wParam, LPARAM lParam);
+    LRESULT OnIdleMsg(WPARAM wParam, LPARAM lParam);
     LRESULT OnCreate(WPARAM wParam, LPARAM lParam);
     LRESULT OnDestroy(WPARAM wParam, LPARAM lParam);
 
@@ -241,7 +243,7 @@ private:
 
 private:
     void DebugMessage(LPCWSTR fmt, ...);
-    void HandleError(DWORD dwError);
+    void HandleError(DWORD dwError, LPVOID lpArgs);
     void PrintEventType(IOEventType Type);
     void HandlePacket(DWORD dwTransferred, LPVOID lpArgs);
 
@@ -271,6 +273,7 @@ public:
     LRESULT Handler(UINT iMessage, WPARAM wParam, LPARAM lParam);
     static DWORD WINAPI WorkerThreadHandler(LPVOID lpArg);
     void Processing();
+    void OnServerIdle();
 };
 
 #endif

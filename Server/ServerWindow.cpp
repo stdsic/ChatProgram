@@ -61,18 +61,33 @@ LRESULT ServerWindow::OnPaint(WPARAM wParam, LPARAM lParam){
 LRESULT ServerWindow::OnCommand(WPARAM wParam, LPARAM lParam){
     switch(LOWORD(wParam)){
         case IDC_BTNSTART:
+            DebugMessage(L"서버를 활성화 하였습니다.\r\n");
             StartListening();
             PostAccept();
             StartThreads();
             break;
 
         case IDC_BTNSTOP:
-            DebugMessage(L"Call StopListening\r\n");
+            DebugMessage(L"서버를 종료합니다.\r\n");
             StopListening();
-            DebugMessage(L"Call StopThreads\r\n");
+            for(int i=0; i<nSessions; i++){
+                if(SessionPool[i]){
+                    // DebugMessage(L"Call Enqueue = %d\r\n", i);
+                    Enqueue(ReleaseQ, SessionPool[i]);
+                }
+            }
+            for(int i=0; i<nSessions; i++){
+                // DebugMessage(L"Call ReleaseSession = %d\r\n", i);
+                ReleaseSession();
+            }
             StopThreads();
             break;
     }
+    return 0;
+}
+
+LRESULT ServerWindow::OnIdleMsg(WPARAM wParam, LPARAM lParam){
+    OnServerIdle();
     return 0;
 }
 
@@ -106,7 +121,7 @@ DWORD WINAPI ServerWindow::WorkerThreadHandler(LPVOID lpArg){
 ////
 ///////////////////////////////////////////////////////////////////////////////////////////////////////////////
 
-ServerWindow::ServerWindow() : bCritical(FALSE), dwKeepAliveOption(1), dwReuseAddressOption(1), bUse(NULL), SessionPool(NULL){
+ServerWindow::ServerWindow() : bCritical(FALSE), dwKeepAliveOption(1), dwReuseAddressOption(1), bUse(NULL), SessionPool(NULL), nConnected(0){
     if(WSAStartup(MAKEWORD(2,2), &wsa) == 0){
         Dummy = CreateSocket();
         if(!Dummy){ throw Exception(); }
@@ -227,11 +242,12 @@ void ServerWindow::DebugMessage(LPCWSTR fmt, ...){
     wchar_t Log[0x300];
     StringCbPrintf(Log,  sizeof(Log), L"[%s]: %s", Time, Debug);
 
-    EnterCriticalSection(&cs);
+    // 큐 동작이나 기타 동기화 객체를 사용하는 부분에서 호출이 겹치면 교착 상태가 된다.
+    // EnterCriticalSection(&cs);
     int Length = GetWindowTextLength(hChatEdit);
     SendMessage(hChatEdit, EM_SETSEL, Length, Length);
     SendMessage(hChatEdit, EM_REPLACESEL, FALSE, (LPARAM)Log);
-    LeaveCriticalSection(&cs);
+    // LeaveCriticalSection(&cs);
 }
 
 void ServerWindow::PrintEventType(IOEventType Type){
@@ -254,7 +270,26 @@ void ServerWindow::PrintEventType(IOEventType Type){
     }
 }
 
-void ServerWindow::HandleError(DWORD dwError){
+void ServerWindow::HandleError(DWORD dwError, LPVOID lpArgs){
+    IOEvent *Event = (IOEvent*)lpArgs;
+    ClientSession *Session = Event->Session;
+
+    switch(dwError){
+        // WSARecv, WSASend
+        case WSAECONNRESET:
+        case WSAECONNABORTED:
+        // GetQueuedCompletionStatus
+        case ERROR_NETNAME_DELETED:
+        case ERROR_CONNECTION_ABORTED:
+            if(Session != NULL){
+                if(Enqueue(ReleaseQ, Session)){
+                    ReleaseSession();
+                    InterlockedDecrement((LONG*)&nConnected);
+                }
+            }
+            break;
+    }
+
     switch(dwError){
         case WSA_IO_PENDING:
             DebugMessage(L"[ERR] 비동기 입출력으로 인한 I/O PENDING 상태입니다. I/O 작업이 정상적으로 실행됩니다.\r\n");
@@ -313,7 +348,12 @@ void ServerWindow::HandleError(DWORD dwError){
 }
 
 void ServerWindow::HandlePacket(DWORD dwTransferred, LPVOID lpArgs){
-
+    if(dwTransferred == 0){
+        // 종료 신호
+        ClientSession *Session = (ClientSession*)lpArgs;
+        Enqueue(ReleaseQ, Session);
+        ReleaseSession();
+    }
 }
 
 ///////////////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -383,7 +423,7 @@ void ServerWindow::StopListening(){
 }
 
 void ServerWindow::PostAccept(){
-    DWORD dwRecvBytes = 0;
+    DWORD dwError = 0, dwRecvBytes = 0;
 
     // 세션을 하나씩만 생성
     ClientSession *NewSession = GetSession();
@@ -394,6 +434,7 @@ void ServerWindow::PostAccept(){
             SafeInit(NewSession, IOEventType::ACCEPT);
 
             NewSession->AddPending();
+            // DebugMessage(L"Session Pending = %d\r\n", NewSession->iPending);
             ret = lpfnAcceptEx(
                     listen_sock,                                // 듣기 전용 소켓
                     NewSession->GetSocket(),                    // 연결 전용 소켓
@@ -405,10 +446,11 @@ void ServerWindow::PostAccept(){
                     (OVERLAPPED*)&NewSession->AcceptEvent
                     );
 
-            if(ret == 0 && WSAGetLastError() != ERROR_IO_PENDING){
+            dwError = WSAGetLastError();
+            if(ret == 0 && dwError != ERROR_IO_PENDING){
+                // DebugMessage(L"Session Pending = %d\r\n", NewSession->iPending);
                 NewSession->SubPending();
-                Enqueue(ReleaseQ, NewSession);
-                ReleaseSession();
+                HandleError(dwError, &NewSession->AcceptEvent);
             }
         } 
     }
@@ -456,27 +498,14 @@ ServerWindow::ClientSession* ServerWindow::GetSession(){
 
 void ServerWindow::ReleaseSession(){
     ClientSession* Session = (ClientSession*)Dequeue(ReleaseQ);
-    if(Session == NULL){return;}
 
-    if (WaitForSingleObject(Session->hDownEvent, 1000) == WAIT_TIMEOUT) {
-        DebugMessage(L"[WARN] ReleaseSession: 아직 완료 안 된 I/O가 있습니다. 강제 정리 시도.\r\n");
-        // 강제 종료 루트: 소켓 닫기
-        if (Session->GetSocket() != INVALID_SOCKET) {
-            CancelIoEx((HANDLE)Session->GetSocket(), NULL);
-            shutdown(Session->GetSocket(), SD_BOTH);
-            closesocket(Session->GetSocket());
-            Session->SetSocket(INVALID_SOCKET);
-        }
-    }
-
-
-
-    EnterCriticalSection(&cs);
     if(Session != NULL){
-        DebugMessage(L"세션을 정리합니다.\r\n");
+        EnterCriticalSection(&cs);
+        // DebugMessage(L"세션을 정리합니다.\r\n");
 
-        if(Session->GetSocket()){ 
-            DebugMessage(L"세션과 연결된 통신 단말의 송수신 기능을 모두 종료합니다. .\r\n");
+        if(Session->GetSocket() != INVALID_SOCKET){ 
+            // DebugMessage(L"세션과 연결된 통신 단말의 송수신 기능을 모두 종료합니다.\r\n");
+            CancelIoEx((HANDLE)Session->GetSocket(), NULL);
             shutdown(Session->GetSocket(), SD_BOTH);
             closesocket(Session->GetSocket());
             Session->SetSocket(INVALID_SOCKET);
@@ -485,11 +514,7 @@ void ServerWindow::ReleaseSession(){
         memset(Session->GetRecvBuffer(), 0, sizeof(wchar_t) * Session->GetCapacity());
         memset(Session->GetSendBuffer(), 0, sizeof(wchar_t) * Session->GetCapacity());
         Session->SetConnected(FALSE);
-        if (WaitForSingleObject(Session->hDownEvent, 1000) == WAIT_OBJECT_0) {
-            Session->Init(); // 안전
-        } else {
-            DebugMessage(L"[WARN] 아직 I/O 완료가 남아있어 Init 생략");
-        }
+        Session->Init(); // 안전
 
         for(int i=0; i<nSessions; i++){ if(SessionPool[i] == Session){ bUse[i] = 0; break; } } 
         LeaveCriticalSection(&cs);
@@ -537,9 +562,10 @@ void ServerWindow::BroadCast(){
         buf.buf = (char*)TempSendBuffer;
         buf.len = sizeof(wchar_t) * Length;
 
-        DebugMessage(L"[INFO] WSASend 함수를 호출하였습니다.\r\n");
+        // DebugMessage(L"[INFO] WSASend 함수를 호출하였습니다.\r\n");
 
         Session->AddPending();
+        // DebugMessage(L"Session Pending = %d\r\n", Session->iPending);
         DWORD dwBytes = 0, dwFlags = 0;
         ret = WSASend(
                 SessionPool[i]->GetSocket(),
@@ -554,7 +580,8 @@ void ServerWindow::BroadCast(){
         DWORD dwError = WSAGetLastError();
         if(ret == SOCKET_ERROR && dwError != WSA_IO_PENDING){
             Session->SubPending();
-            HandleError(dwError);
+            // DebugMessage(L"Session Pending = %d\r\n", Session->iPending);
+            HandleError(dwError, &SessionPool[i]->SendEvent);
         }
     }
     
@@ -631,11 +658,12 @@ void ServerWindow::StartThreads(){
 }
 
 void ServerWindow::StopThreads(){
-    DebugMessage(L"listen_sock CancelIoEx\r\n");
-    CancelIoEx((HANDLE)listen_sock, NULL);
+    if(listen_sock != INVALID_SOCKET){ 
+        CancelIoEx((HANDLE)listen_sock, NULL);
+        listen_sock = INVALID_SOCKET;
+    }
 
     for(int i=0; i<nSessions; i++){
-        DebugMessage(L"SessionPool CancelIoEx = %d\r\n", i);
         if(SessionPool[i] == NULL){ continue; }
         SessionPool[i]->SetConnected(FALSE);
         if(SessionPool[i]->GetSocket() != INVALID_SOCKET){
@@ -644,11 +672,12 @@ void ServerWindow::StopThreads(){
     }
 
     for(int i=0; i<nSessions; i++){
-        DebugMessage(L"SessionPool closesocket = %d\r\n", i);
         if(SessionPool[i] == NULL){ continue; }
+        /*
         if(WaitForSingleObject(SessionPool[i]->hDownEvent, 4000) == WAIT_TIMEOUT){
             // 세션 드레인 타임아웃
         }
+        */
 
         if(SessionPool[i]->GetSocket() != INVALID_SOCKET){
             shutdown(SessionPool[i]->GetSocket(), SD_BOTH);
@@ -658,14 +687,12 @@ void ServerWindow::StopThreads(){
     }
 
     for(int i=0; i<nWorkerThreads; i++){
-        DebugMessage(L"PostQueuedCompletionStatus = %d\r\n", i);
         PostQueuedCompletionStatus(hcp, 0, EXIT_KEY, NULL);
     }
 
     for(int i=0; i<nWorkerThreads; i++){
         if(hThread[i]){
-            DebugMessage(L"WaitForSingleObject = %d\r\n", i);
-            WaitForSingleObject(hThread[i], INFINITE);
+            // WaitForSingleObject(hThread[i], INFINITE);
             CloseHandle(hThread[i]);
             hThread[i] = NULL;
         }
@@ -674,12 +701,14 @@ void ServerWindow::StopThreads(){
 
 void ServerWindow::PostConnect(ClientSession *Session){
     SafeInit(Session, IOEventType::CONNECT);
+    Session->AddPending();
     PostQueuedCompletionStatus(hcp, 0, (ULONG_PTR)Session, (OVERLAPPED*)&Session->ConnectEvent);
 }
 
 void ServerWindow::PostDisconnect(ClientSession *Session){
     SafeInit(Session, IOEventType::DISCONNECT);
     Session->AddPending();
+    // DebugMessage(L"Session Pending = %d\r\n", Session->iPending);
     PostQueuedCompletionStatus(hcp, 0, (ULONG_PTR)Session, (OVERLAPPED*)&Session->DisconnectEvent);
 }
 
@@ -719,7 +748,8 @@ void ServerWindow::OnAccept(ClientSession* Session){
 
     if(InetNtopW(AF_INET, &NewRemoteAddress.sin_addr, IP, INET_ADDRSTRLEN) != NULL){
         // Show IP Address
-        DebugMessage(L"[INFO] 클라이언트가 접속하였습니다. (Address Family: IPv4, IP Address: %s, Port: %d)\r\n", IP, ntohs(NewRemoteAddress.sin_port));
+        InterlockedIncrement((LONG*)&nConnected);
+        DebugMessage(L"[INFO] 클라이언트가 접속하였습니다. Address Family: IPv4, IP Address: %s, Port: %d\r\n", IP, ntohs(NewRemoteAddress.sin_port));
 
         // Post ConnectEvent
         Session->SetRemoteAddress(NewRemoteAddress);
@@ -747,6 +777,7 @@ void ServerWindow::OnConnect(ClientSession* Session){
     buf.len = sizeof(wchar_t) * Session->GetCapacity();
 
     Session->AddPending();
+    // DebugMessage(L"Session Pending = %d\r\n", Session->iPending);
     dwBytes = dwFlags = 0;
     ret = WSARecv(
             Session->GetSocket(),
@@ -761,7 +792,8 @@ void ServerWindow::OnConnect(ClientSession* Session){
     dwError = WSAGetLastError();
     if(ret == SOCKET_ERROR && dwError != WSA_IO_PENDING){
         Session->SubPending();
-        HandleError(dwError);
+        // DebugMessage(L"Session Pending = %d\r\n", Session->iPending);
+        HandleError(dwError, &Session->RecvEvent);
     }
 }
 
@@ -782,7 +814,6 @@ void ServerWindow::OnRecv(ClientSession* Session){
 
     if(Session->GetSocket() == INVALID_SOCKET){
         DebugMessage(L"[ERR] 세션이 가진 소켓이 유효하지 않습니다. 세션을 해제합니다.\r\n");
-        PostDisconnect(Session);
         return;
     }
 
@@ -798,7 +829,7 @@ void ServerWindow::OnRecv(ClientSession* Session){
         int Capacity = Session->GetCapacity();
 
         TempRecvBuffer[Length] = 0;
-        DebugMessage(L"[MSG] [ Address (%s, %d) ]: %s\r\n", IP, ntohs(TempAddress.sin_port), TempRecvBuffer);
+        DebugMessage(L"[ MSG - ( %s, %d ) ]: %s\r\n", IP, ntohs(TempAddress.sin_port), TempRecvBuffer);
     }
     BroadCast();
 
@@ -809,8 +840,9 @@ void ServerWindow::OnRecv(ClientSession* Session){
     buf.buf = (char*)Session->GetRecvBuffer();
     buf.len = sizeof(wchar_t) * Session->GetCapacity();
 
-    DebugMessage(L"[INFO] WSARecv 함수를 호출하였습니다.\r\n");
+    // DebugMessage(L"[INFO] WSARecv 함수를 호출하였습니다.\r\n");
     Session->AddPending();
+    // DebugMessage(L"Session Pending = %d\r\n", Session->iPending);
     dwBytes = 0, dwFlags = 0;
     ret = WSARecv(
                 Session->GetSocket(),
@@ -825,7 +857,8 @@ void ServerWindow::OnRecv(ClientSession* Session){
     dwError = WSAGetLastError();
     if(ret == SOCKET_ERROR && dwError != WSA_IO_PENDING){
         Session->SubPending();
-        HandleError(dwError);
+        // DebugMessage(L"Session Pending = %d\r\n", Session->iPending);
+        HandleError(dwError, &Session->RecvEvent);
     }
 }
 
@@ -849,19 +882,20 @@ void ServerWindow::Processing(){
     IOEventType EventType;
 
     while(1){
+        // DebugMessage(L"GetQueuedCompletionStatus로 스레드가 대기 상태에 들어갑니다.\r\n");
         BOOL bIOCP = GetQueuedCompletionStatus(hcp, &dwTrans, &Key, (OVERLAPPED**)&Event, INFINITE);
+        // DebugMessage(L"GetQueuedCompletionStatus로 스레드가 깨어났습니다.\r\n");
         if(Event == NULL){
             if(!bIOCP){
                 dwError = GetLastError();
                 if(dwError == WAIT_TIMEOUT){ break; }
                 if(dwError == ERROR_ABANDONED_WAIT_0){ break; }
-
-                HandleError(dwError);
+                HandleError(dwError, Event);
                 continue;
             }
 
             if(Key == EXIT_KEY){
-                DebugMessage(L"종료 신호가 발생하였습니다. 작업자 스레드를 종료합니다.\r\n");
+                // DebugMessage(L"종료 신호가 발생하였습니다. 작업자 스레드를 종료합니다.\r\n");
                 break;
             }
 
@@ -876,11 +910,12 @@ void ServerWindow::Processing(){
         }
 
         Session->SubPending();
+        // DebugMessage(L"Session Pending = %d\r\n", Session->iPending);
         EventType = Event->Type;
 
         if(!bIOCP){
             dwError = GetLastError(); // 취소면 ERROR_OPERATION_ABORTED(995)
-            HandleError(dwError);
+            HandleError(dwError, Event);
             continue;
         }
 
@@ -890,7 +925,7 @@ void ServerWindow::Processing(){
             continue;
         }
 
-        PrintEventType(EventType);
+        // PrintEventType(EventType);
         switch(EventType){
             case IOEventType::ACCEPT:
                 OnAccept(Session);
@@ -917,4 +952,17 @@ void ServerWindow::Processing(){
                 break;
         }
     }
+}
+
+///////////////////////////////////////////////////////////////////////////////////////////////////////////////
+//// *ServerWindow Idletime(e.g. UI)
+////
+////
+////
+///////////////////////////////////////////////////////////////////////////////////////////////////////////////
+
+void ServerWindow::OnServerIdle(){
+    wchar_t Status[0x100];
+    StringCbPrintf(Status, sizeof(Status), L"🟢 Server Running | Clients: %d", nConnected);
+    SetWindowText(hStatusText, Status);
 }
