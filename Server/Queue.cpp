@@ -5,7 +5,7 @@ Queue *CreateQueue(int Capacity){
 
     NewQueue->Capacity = Capacity;
     NewQueue->DataArray = (void**)malloc(sizeof(void*) * Capacity);
-    NewQueue->Front = NewQueue->Rear = 0;
+    NewQueue->Count = NewQueue->Front = NewQueue->Rear = 0;
     InitializeCriticalSection(&NewQueue->cs);
 
     return NewQueue;
