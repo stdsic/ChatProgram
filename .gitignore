@@ -7,3 +7,4 @@
 *.txt
 *.exe
 *.json
+!ClientResource.rc
